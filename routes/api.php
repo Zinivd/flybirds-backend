@@ -1,22 +1,25 @@
 <?php
 
+use App\Http\Controllers\Api\Admin\AttributeController;
+use App\Http\Controllers\Api\Admin\InventoryController;
 use App\Http\Controllers\Api\AuthController;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Storage;
 use App\Http\Controllers\Api\Admin\CategoryController;
+use App\Http\Controllers\Api\Admin\ProductController;
 
 Route::prefix('auth')->group(function () {
     // Regular Customer Registration Pipeline
     Route::post('/register/init', [AuthController::class, 'registerInit']);
     Route::post('/register/verify', [AuthController::class, 'registerVerify']);
-    
+
     // Administrative Personnel Registration Pipeline (Public Initial Configuration Gateways)
     Route::post('/admin/register/init', [AuthController::class, 'adminRegisterInit']);
     Route::post('/admin/register/verify', [AuthController::class, 'adminRegisterVerify']);
-    
+
     // Core Unified Login Gate (Pass name('login') to prevent RouteNotException errors)
     Route::post('/login', [AuthController::class, 'login'])->name('login');
-    
+
     // Protected User Profile Modifier Route Group
     Route::middleware('auth:api')->group(function () {
         Route::put('/profile/update/{user_id}', [AuthController::class, 'updateProfile']);
@@ -25,8 +28,67 @@ Route::prefix('auth')->group(function () {
 });
 
 
-Route::prefix('admin')->middleware(['auth:sanctum', 'admin'])->group(function () {
+Route::prefix('admin')->middleware(['auth:api', 'superadmin'])->group(function () {
+
+    // Categories
+    Route::get('/categories', [CategoryController::class, 'index']);
+    Route::get('/categories/{id}', [CategoryController::class, 'show']);
     Route::post('/categories', [CategoryController::class, 'store']);
+    Route::post('/categories/{id}', [CategoryController::class, 'update']);
+    Route::delete('/categories/{id}', [CategoryController::class, 'destroy']);
+
+    // Attributes & Media
+    Route::prefix('attributes')->group(function () {
+        Route::get('/colors', [AttributeController::class, 'indexColors']);
+        Route::post('/colors', [AttributeController::class, 'storeColors']);
+        Route::delete('/colors/{id}', [AttributeController::class, 'deleteColor']);
+        Route::get('/media', [AttributeController::class, 'listFiles']);
+        Route::post('/media/upload', [AttributeController::class, 'uploadFiles']);
+        Route::delete('/media/{id}', [AttributeController::class, 'deleteFile']);
+    });
+
+    // Products
+    Route::prefix('products')->group(function () {
+
+        // CRUD
+        Route::get('/', [ProductController::class, 'index']);    // GET    /admin/products
+        Route::post('/', [ProductController::class, 'store']);    // POST   /admin/products
+        Route::get('/{id}', [ProductController::class, 'show']);     // GET    /admin/products/{id}
+        Route::post('/{id}', [ProductController::class, 'update']);   // POST   /admin/products/{id}
+        Route::delete('/{id}', [ProductController::class, 'destroy']); // DELETE /admin/products/{id}
+
+        // Listing filters
+        Route::get('/category/{categoryId}', [ProductController::class, 'getByCategory']); // GET /admin/products/category/{id}
+        Route::get('/{id}/similar', [ProductController::class, 'similar']);        // GET /admin/products/{id}/similar
+
+        // Status toggles
+        Route::patch('/{id}/publish', [ProductController::class, 'togglePublish']);    // PATCH
+        Route::patch('/{id}/today-sale', [ProductController::class, 'toggleTodaySale']); // PATCH
+        Route::patch('/{id}/flash-sale', [ProductController::class, 'updateFlashSale']); // PATCH
+
+        // Delete color variant (cascades its images + sizes)
+        Route::delete(
+            '/{productId}/colors/{colorVariantId}',
+            [ProductController::class, 'destroyColorVariant']
+        );
+
+        // Delete individual size from a color
+        Route::delete(
+            '/{productId}/colors/{colorVariantId}/sizes/{sizeStockId}',
+            [ProductController::class, 'destroySizeStock']
+        );
+    });
+
+    // Products by Category (public listing)
+    Route::get('/products/category/{categoryId}', [ProductController::class, 'getByCategory']);
+
+
+    Route::prefix('inventory')->group(function () {
+        Route::get('/', [InventoryController::class, 'index']);
+        Route::get('/product/{productId}', [InventoryController::class, 'getByProduct']);
+        Route::get('/size/{size}', [InventoryController::class, 'getBySize']);
+        Route::post('/update-by-product/{productId}', [InventoryController::class, 'updateStockByProduct']);
+    });
 });
 
 
@@ -39,7 +101,7 @@ Route::get('/test-s3', function () {
         if (Storage::disk('s3')->exists('test-flybirds.txt')) {
             // 3. Generate a temporary URL for the file
             $url = Storage::disk('s3')->temporaryUrl('test-flybirds.txt', now()->addMinutes(5));
-            
+
             return response()->json([
                 'status' => 'success',
                 'message' => 'Connection verified!',
