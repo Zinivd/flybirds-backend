@@ -2,11 +2,16 @@
 
 use App\Http\Controllers\Api\Admin\AttributeController;
 use App\Http\Controllers\Api\Admin\InventoryController;
+use App\Http\Controllers\Api\Admin\CustomerController;
+use App\Http\Controllers\Api\Admin\OrderController;
+use App\Http\Controllers\Api\Admin\ProductSupportQueryController;
+use App\Http\Controllers\Api\Admin\SupportTicketController;
 use App\Http\Controllers\Api\AuthController;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Storage;
 use App\Http\Controllers\Api\Admin\CategoryController;
 use App\Http\Controllers\Api\Admin\ProductController;
+use App\Http\Controllers\Api\ReviewController;
 
 Route::prefix('auth')->group(function () {
     // Regular Customer Registration Pipeline
@@ -28,14 +33,18 @@ Route::prefix('auth')->group(function () {
 });
 
 
-Route::prefix('admin')->middleware(['auth:api', 'superadmin'])->group(function () {
+Route::prefix('admin')->group(function () {
 
     // Categories
-    Route::get('/categories', [CategoryController::class, 'index']);
-    Route::get('/categories/{id}', [CategoryController::class, 'show']);
-    Route::post('/categories', [CategoryController::class, 'store']);
-    Route::post('/categories/{id}', [CategoryController::class, 'update']);
-    Route::delete('/categories/{id}', [CategoryController::class, 'destroy']);
+    Route::prefix('categories')->group(function () {
+        Route::get('/', [CategoryController::class, 'index']);
+        Route::get('/{id}', [CategoryController::class, 'show']);
+        Route::post('/', [CategoryController::class, 'store']);
+        Route::post('/{id}', [CategoryController::class, 'update']);
+        Route::delete('/{id}', [CategoryController::class, 'destroy']);
+    });
+
+
 
     // Attributes & Media
     Route::prefix('attributes')->group(function () {
@@ -88,6 +97,45 @@ Route::prefix('admin')->middleware(['auth:api', 'superadmin'])->group(function (
         Route::get('/product/{productId}', [InventoryController::class, 'getByProduct']);
         Route::get('/size/{size}', [InventoryController::class, 'getBySize']);
         Route::post('/update-by-product/{productId}', [InventoryController::class, 'updateStockByProduct']);
+    });
+
+    // Reviews
+    Route::prefix('reviews')->group(function () {
+        Route::get('/', [ReviewController::class, 'index']);
+        Route::post('/', [ReviewController::class, 'store']);
+        Route::delete('/{id}', [ReviewController::class, 'destroy']);
+    });
+
+    // Customers
+    Route::prefix('customers')->group(function () {
+        Route::get('/', [CustomerController::class, 'index']);
+        Route::delete('/{id}', [CustomerController::class, 'destroy']);
+        Route::patch('/{id}/lock', [CustomerController::class, 'lock']);
+    });
+
+    // Orders
+    Route::prefix('orders')->group(function () {
+        Route::get('/', [OrderController::class, 'index']);
+        Route::get('/{id}', [OrderController::class, 'show']);
+        Route::patch('/{id}/status', [OrderController::class, 'updateStatus']);
+        Route::delete('/{id}', [OrderController::class, 'destroy']);
+    });
+
+    // Support Product Queries
+    Route::prefix('support-products')->group(function () {
+        Route::get('/', [ProductSupportQueryController::class, 'index']);
+        Route::get('/{id}', [ProductSupportQueryController::class, 'show']);
+        Route::patch('/{id}/reply', [ProductSupportQueryController::class, 'reply']);
+        Route::delete('/{id}', [ProductSupportQueryController::class, 'destroy']);
+    });
+
+    // Support Tickets
+    Route::prefix('support-tickets')->group(function () {
+        Route::get('/', [SupportTicketController::class, 'index']);
+        Route::get('/{id}', [SupportTicketController::class, 'show']);
+        Route::patch('/{id}/reply', [SupportTicketController::class, 'reply']);
+        Route::patch('/{id}/status', [SupportTicketController::class, 'updateStatus']);
+        Route::delete('/{id}', [SupportTicketController::class, 'destroy']);
     });
 });
 

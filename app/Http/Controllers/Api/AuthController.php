@@ -127,6 +127,9 @@ class AuthController extends Controller
             }
 
             $user = JWTAuth::setToken($token)->toUser();
+            if ($user->is_locked) {
+                return response()->json(['status' => 'error', 'message' => 'Your account has been locked. Please contact support.'], 403);
+            }
             $refreshToken = JWTAuth::customClaims(['is_refresh' => true, 'exp' => time() + (365 * 24 * 60 * 60)])->fromUser($user);
 
             return response()->json([
@@ -145,6 +148,10 @@ class AuthController extends Controller
 
             if (!$user) {
                 return response()->json(['status' => 'error', 'message' => 'User identity not discovered.'], 444);
+            }
+
+            if ($user->is_locked) {
+                return response()->json(['status' => 'error', 'message' => 'Your account has been locked. Please contact support.'], 403);
             }
 
             $otpCode = (string) random_int(10000, 99999);
@@ -178,6 +185,10 @@ class AuthController extends Controller
                 }
 
                 $user = FlyUser::find($payload['user_id']);
+
+                if ($user->is_locked) {
+                    return response()->json(['status' => 'error', 'message' => 'Your account has been locked. Please contact support.'], 403);
+                }
 
                 $token = JWTAuth::fromUser($user);
                 $refreshToken = JWTAuth::customClaims(['is_refresh' => true, 'exp' => time() + (365 * 24 * 60 * 60)])->fromUser($user);

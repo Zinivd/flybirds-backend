@@ -23,11 +23,17 @@ class FlyUser extends Authenticatable implements JWTSubject
         'phone',
         'password',
         'user_type',
-        'otp_verified_at'
+        'otp_verified_at',
+        'is_locked',
     ];
 
     protected $hidden = [
         'password',
+    ];
+
+    protected $casts = [
+        'otp_verified_at' => 'datetime',
+        'is_locked' => 'boolean',
     ];
 
     // Automate alphanumeric sequence generation strings

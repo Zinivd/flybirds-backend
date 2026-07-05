@@ -18,6 +18,7 @@ return new class extends Migration
             // Explicit assignment states: user, superadmin, manager, finance
             $table->string('user_type')->default('user'); 
             $table->timestamp('otp_verified_at')->nullable();
+            $table->boolean('is_locked')->default(false);
             $table->timestamps();
         });
     }

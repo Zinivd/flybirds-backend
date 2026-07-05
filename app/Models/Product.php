@@ -38,6 +38,12 @@ class Product extends Model
         return $this->hasMany(ProductColorVariant::class);
     }
 
+    // Product → Reviews
+    public function reviews()
+    {
+        return $this->hasMany(Review::class);
+    }
+
     // ─── Computed Price ────────────────────────────────────────────
 
     public function getEffectivePriceAttribute(): float
