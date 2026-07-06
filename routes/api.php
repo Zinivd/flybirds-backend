@@ -12,6 +12,8 @@ use Illuminate\Support\Facades\Storage;
 use App\Http\Controllers\Api\Admin\CategoryController;
 use App\Http\Controllers\Api\Admin\ProductController;
 use App\Http\Controllers\Api\ReviewController;
+use App\Http\Controllers\Api\PaymentController;
+use App\Http\Controllers\Api\DelhiveryController;
 
 Route::prefix('auth')->group(function () {
     // Regular Customer Registration Pipeline
@@ -139,6 +141,16 @@ Route::prefix('admin')->group(function () {
     });
 });
 
+Route::prefix('payment')->group(function () {
+    Route::post('/create-order', [PaymentController::class, 'createOrder']);
+    Route::post('/verify', [PaymentController::class, 'verifyPayment']);
+});
+
+Route::prefix('delhivery')->group(function () {
+    Route::get('/serviceability/{pincode}', [DelhiveryController::class, 'checkServiceability']);
+    Route::get('/label', [DelhiveryController::class, 'getLabel']);
+    Route::get('/track/{waybill}', [DelhiveryController::class, 'track']);
+});
 
 Route::get('/test-s3', function () {
     try {
