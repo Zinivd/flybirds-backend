@@ -150,6 +150,8 @@ Route::prefix('delhivery')->group(function () {
     Route::get('/serviceability/{pincode}', [DelhiveryController::class, 'checkServiceability']);
     Route::get('/label', [DelhiveryController::class, 'getLabel']);
     Route::get('/track/{waybill}', [DelhiveryController::class, 'track']);
+    Route::post('/shipment/create', [DelhiveryController::class, 'createShipment']);
+    Route::get('/calculate-cost', [DelhiveryController::class, 'calculateCost']);
 });
 
 Route::get('/test-s3', function () {

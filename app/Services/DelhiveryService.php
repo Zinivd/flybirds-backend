@@ -110,4 +110,69 @@ class DelhiveryService
 
         return $response->json();
     }
+
+    /**
+     * Create/Book a B2C shipment with Delhivery.
+     */
+    public function createShipment(array $shipmentData)
+    {
+        if (empty($this->token)) {
+            throw new Exception("Delhivery API token is not configured.");
+        }
+
+        $url = rtrim($this->baseUrl, '/') . '/api/cmu/create.json';
+
+        // Format payload as form parameters: format=json and data=<json_string>
+        $response = Http::asForm()->withHeaders([
+            'Authorization' => 'Token ' . $this->token,
+        ])->post($url, [
+            'format' => 'json',
+            'data' => json_encode($shipmentData)
+        ]);
+
+        if ($response->failed()) {
+            Log::error('Delhivery Shipment Creation Failed', [
+                'status' => $response->status(),
+                'body' => $response->body()
+            ]);
+            throw new Exception("Failed to create shipment: " . $response->body());
+        }
+
+        return $response->json();
+    }
+
+    /**
+     * Calculate Shipping Cost / Rates.
+     */
+    public function calculateShippingCost(array $params)
+    {
+        if (empty($this->token)) {
+            throw new Exception("Delhivery API token is not configured.");
+        }
+
+        $url = rtrim($this->baseUrl, '/') . '/api/kinko/v1/invoice/charges/.json';
+
+        // Prepare query parameters
+        $query = [
+            'md' => $params['md'] ?? 'E', // E for Express, S for Surface
+            'cgm' => $params['cgm'] ?? 500, // weight in grams
+            'ss' => $params['ss'] ?? 'Delivered',
+            'o_pin' => $params['o_pin'] ?? '',
+            'd_pin' => $params['d_pin'] ?? '',
+        ];
+
+        $response = Http::withHeaders([
+            'Authorization' => 'Token ' . $this->token,
+        ])->get($url, $query);
+
+        if ($response->failed()) {
+            Log::error('Delhivery Shipping Cost Calculation Failed', [
+                'status' => $response->status(),
+                'body' => $response->body()
+            ]);
+            throw new Exception("Failed to calculate shipping cost: " . $response->body());
+        }
+
+        return $response->json();
+    }
 }
