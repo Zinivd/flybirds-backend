@@ -56,21 +56,21 @@ class AttributeController extends Controller
 
     public function uploadFiles(Request $request)
     {
-        // Safety Check: Validate the existence of the file array
         if (!$request->hasFile('files')) {
             return response()->json(['status' => 'error', 'message' => 'No files provided.'], 400);
         }
 
-        $request->validate(['files.*' => 'required|file|max:5120']);
+        $request->validate(['files.*' => 'required|file|max:10240']);
 
         try {
             $uploadedData = [];
             foreach ($request->file('files') as $file) {
-                $path = $file->store('uploads', 's3');
+                $path = $file->store('uploads', 's3'); // no visibility option
+
                 $media = Media::create([
                     'file_name' => $file->getClientOriginalName(),
                     'file_size' => round($file->getSize() / 1024, 2) . ' KB',
-                    'file_url'  => Storage::disk('s3')->url($path),
+                    'file_url' => Storage::disk('s3')->url($path),
                     'mime_type' => $file->getClientMimeType(),
                 ]);
                 $uploadedData[] = $media;

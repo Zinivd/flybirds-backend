@@ -227,7 +227,7 @@ class ProductController extends Controller
                 'colors.*.color_id'        => 'required|exists:colors,id',
 
                 // Per-color images
-                'colors.*.gallery_image_ids'   => 'nullable|array',
+                'colors.*.gallery_image_ids' => 'nullable|array|max:5',
                 'colors.*.gallery_image_ids.*' => 'integer|exists:media,id',
                 'colors.*.thumbnail_image_id'  => 'nullable|integer|exists:media,id',
 
@@ -382,7 +382,7 @@ class ProductController extends Controller
                 'colors.*.color_variant_id'    => 'nullable|exists:product_color_variants,id', // existing variant ID
                 'colors.*.color_id'            => 'required_with:colors|exists:colors,id',
 
-                'colors.*.gallery_image_ids'   => 'nullable|array',
+                'colors.*.gallery_image_ids' => 'nullable|array|max:5',
                 'colors.*.gallery_image_ids.*' => 'integer|exists:media,id',
                 'colors.*.thumbnail_image_id'  => 'nullable|integer|exists:media,id',
 

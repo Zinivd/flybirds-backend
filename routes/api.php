@@ -1,11 +1,14 @@
 <?php
 
 use App\Http\Controllers\Api\Admin\AttributeController;
+use App\Http\Controllers\Api\Admin\HomeBanner;
 use App\Http\Controllers\Api\Admin\InventoryController;
 use App\Http\Controllers\Api\Admin\CustomerController;
 use App\Http\Controllers\Api\Admin\OrderController;
 use App\Http\Controllers\Api\Admin\ProductSupportQueryController;
 use App\Http\Controllers\Api\Admin\SupportTicketController;
+use App\Http\Controllers\Api\Admin\UserAddressController;
+use App\Http\Controllers\Api\Admin\VideoReelController;
 use App\Http\Controllers\Api\AuthController;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Storage;
@@ -14,6 +17,8 @@ use App\Http\Controllers\Api\Admin\ProductController;
 use App\Http\Controllers\Api\ReviewController;
 use App\Http\Controllers\Api\PaymentController;
 use App\Http\Controllers\Api\DelhiveryController;
+use App\Http\Controllers\Api\BannerController;
+use App\Http\Controllers\Api\Admin\cart_whishlist;
 
 Route::prefix('auth')->group(function () {
     // Regular Customer Registration Pipeline
@@ -32,10 +37,20 @@ Route::prefix('auth')->group(function () {
         Route::put('/profile/update/{user_id}', [AuthController::class, 'updateProfile']);
         Route::get('/user/info/{user_id}', [AuthController::class, 'getUserInfo']);
     });
+
+    Route::post('/forgot-password/send-otp', [AuthController::class, 'sendPasswordResetOtp']);
+
+    Route::post('/forgot-password/verify-otp', [AuthController::class, 'verifyPasswordResetOtp']);
 });
 
 
 Route::prefix('admin')->group(function () {
+
+
+    Route::post('/video-reels', [VideoReelController::class, 'store']);
+    Route::get('/video-reels', [VideoReelController::class, 'index']);
+    Route::patch('/video-reels/{id}/status', [VideoReelController::class, 'updateStatus']);
+
 
     // Categories
     Route::prefix('categories')->group(function () {
@@ -139,6 +154,9 @@ Route::prefix('admin')->group(function () {
         Route::patch('/{id}/status', [SupportTicketController::class, 'updateStatus']);
         Route::delete('/{id}', [SupportTicketController::class, 'destroy']);
     });
+
+
+
 });
 
 Route::prefix('payment')->group(function () {
@@ -156,24 +174,60 @@ Route::prefix('delhivery')->group(function () {
 
 Route::get('/test-s3', function () {
     try {
-        // 1. Attempt to write a test file to S3
-        Storage::disk('s3')->put('test-flybirds.txt', 'Flybirds S3 Connection Successful!');
+        // Attempt to upload a dummy file
+        Storage::disk('s3')->put('debug-test.txt', 'Connection Successful');
 
-        // 2. Check if the file exists
-        if (Storage::disk('s3')->exists('test-flybirds.txt')) {
-            // 3. Generate a temporary URL for the file
-            $url = Storage::disk('s3')->temporaryUrl('test-flybirds.txt', now()->addMinutes(5));
-
-            return response()->json([
-                'status' => 'success',
-                'message' => 'Connection verified!',
-                'file_url' => $url
-            ]);
-        }
+        // Return success if no exception was thrown
+        return response()->json(['status' => 'success', 'message' => 'S3 is working!']);
     } catch (\Exception $e) {
-        return response()->json([
-            'status' => 'error',
-            'message' => $e->getMessage()
-        ], 500);
+        // Return the exact error from AWS
+        return response()->json(['status' => 'error', 'message' => $e->getMessage()]);
     }
 });
+
+
+
+Route::get('/debug-s3-upload', function () {
+    try {
+        // This attempts a direct write to the S3 bucket
+        $result = Storage::disk('s3')->put('debug-test.txt', 'Test file content');
+
+        if ($result) {
+            return "Upload successful! Check your S3 bucket.";
+        }
+        return "Upload failed: disk::put returned false.";
+    } catch (\Exception $e) {
+        // This will print the actual error from AWS (e.g., Access Denied, Invalid Region)
+        return "AWS Error: " . $e->getMessage();
+    }
+});
+
+
+Route::prefix('banners')->group(function () {
+    Route::get('/', [HomeBanner::class, 'index']);
+    Route::post('/', [HomeBanner::class, 'store']);
+    Route::get('/{id}', [HomeBanner::class, 'show']);
+    Route::post('/{id}', [HomeBanner::class, 'update']); // POST for _method spoof / file upload
+    Route::delete('/{id}', [HomeBanner::class, 'destroy']);
+    Route::get('/{id}/download/{type}', [HomeBanner::class, 'download']);
+});
+
+// Cart
+Route::post('admin/users/{userId}/cart', [cart_whishlist::class, 'addToCart']);
+Route::get('admin/users/{userId}/cart', [cart_whishlist::class, 'listCart']);
+Route::patch('admin/users/{userId}/cart/{id}', [cart_whishlist::class, 'updateCart']);
+Route::delete('admin/users/{userId}/cart/{id}', [cart_whishlist::class, 'removeFromCart']);
+Route::delete('admin/users/{userId}/cart', [cart_whishlist::class, 'clearCart']);
+
+// Wishlist
+Route::post('admin/users/{userId}/wishlist', [cart_whishlist::class, 'addToWishlist']);
+Route::get('admin/users/{userId}/wishlist', [cart_whishlist::class, 'listWishlist']);
+Route::delete('admin/users/{userId}/wishlist/{id}', [cart_whishlist::class, 'removeFromWishlist']);
+Route::delete('admin/users/{userId}/wishlist/product/{productId}', [cart_whishlist::class, 'removeFromWishlistByProduct']);
+
+
+Route::post('admin/users/{userId}/addresses', [UserAddressController::class, 'store']);
+Route::get('admin/users/{userId}/addresses', [UserAddressController::class, 'getByUserId']);
+Route::get('admin/users/{userId}/addresses/{addressId}', [UserAddressController::class, 'show']);
+Route::patch('admin/users/{userId}/addresses/{addressId}', [UserAddressController::class, 'update']);
+Route::delete('admin/users/{userId}/addresses/{addressId}', [UserAddressController::class, 'destroy']);
