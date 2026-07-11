@@ -1,11 +1,12 @@
 <?php
+
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 
-class cart_wishlist extends Model
+class CartWishlistData extends Model
 {
-    protected $table = 'cart_wishlists';
+    protected $table = 'cart_wishlist_data';
 
     protected $fillable = [
         'user_id',

@@ -1,4 +1,5 @@
 <?php
+
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Schema;
@@ -7,9 +8,9 @@ return new class extends Migration
 {
     public function up(): void
     {
-        Schema::create('cart_wishlists', function (Blueprint $table) {
+        Schema::create('cart_wishlist_data', function (Blueprint $table) {
             $table->id();
-            $table->unsignedBigInteger('user_id');
+            $table->string('user_id'); // Changed from unsignedBigInteger to string
             $table->unsignedBigInteger('product_id');
             $table->unsignedBigInteger('product_color_variant_id')->nullable();
             $table->unsignedBigInteger('product_size_stock_id')->nullable();
@@ -32,6 +33,6 @@ return new class extends Migration
 
     public function down(): void
     {
-        Schema::dropIfExists('cart_wishlists');
+        Schema::dropIfExists('cart_wishlist_data');
     }
 };

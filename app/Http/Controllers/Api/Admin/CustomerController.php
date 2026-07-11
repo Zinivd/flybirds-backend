@@ -84,4 +84,30 @@ class CustomerController extends Controller
             ], 500);
         }
     }
+
+
+     public function unlock($id)
+    {
+        try {
+            $customer = FlyUser::where('user_type', 'user')->where('user_id', $id)->first();
+            if (!$customer) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'Customer not found.'
+                ], 404);
+            }
+            $customer->is_locked = false;
+            $customer->save();
+            return response()->json([
+                'status' => 'success',
+                'message' => 'Customer unlocked successfully.',
+                'data' => $customer
+            ], 200);
+        } catch (Exception $e) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Failed to unlock customer.'
+            ], 500);
+        }
+    }
 }

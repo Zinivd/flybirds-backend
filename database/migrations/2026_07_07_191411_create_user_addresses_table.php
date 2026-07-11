@@ -9,7 +9,7 @@ return new class extends Migration
     {
         Schema::create('user_addresses', function (Blueprint $table) {
     $table->id();
-    $table->unsignedBigInteger('user_id');
+    $table->string('user_id', 50);
     $table->enum('address_type', ['home', 'work', 'other'])->default('home');
     $table->string('full_name');
     $table->string('phone');

@@ -6,12 +6,13 @@ use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use Tymon\JWTAuth\Contracts\JWTSubject;
 use Illuminate\Support\Str;
+use Illuminate\Database\Eloquent\Model;
 
 class FlyUser extends Authenticatable implements JWTSubject
 {
     use Notifiable;
 
-    protected $table = 'fly_users';
+ protected $table = 'fly_users';
     protected $primaryKey = 'user_id';
     public $incrementing = false;
     protected $keyType = 'string';
@@ -70,4 +71,6 @@ class FlyUser extends Authenticatable implements JWTSubject
             'user_type' => $this->user_type
         ];
     }
+
+    
 }
