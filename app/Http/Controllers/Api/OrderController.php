@@ -124,28 +124,24 @@ class OrderController extends Controller
     // window (discount_start_date / discount_end_date).
     // ═══════════════════════════════════════════════════════════════
     private function calculateEffectiveUnitPrice(Product $product, ?ProductSizeStock $sizeStock): float
-    {
-        $basePrice = (float) ($sizeStock->price ?? $product->unit_price ?? 0);
-
-        $discount = (float) ($product->discount ?? 0);
-        if ($discount <= 0) {
-            return round($basePrice, 2);
-        }
-
-        $now = now();
-        if ($product->discount_start_date && $now->lt($product->discount_start_date)) {
-            return round($basePrice, 2);
-        }
-        if ($product->discount_end_date && $now->gt($product->discount_end_date)) {
-            return round($basePrice, 2);
-        }
-
-        $discounted = $product->discount_type === 'percent'
-            ? $basePrice - ($basePrice * $discount / 100)
-            : $basePrice - $discount;
-
-        return round(max(0, $discounted), 2);
+{
+    $basePrice = (float) ($sizeStock->price ?? $product->unit_price ?? 0);
+    $discount = (float) ($product->discount ?? 0);
+    if ($discount <= 0) {
+        return round($basePrice, 2);
     }
+    $now = now();
+    if ($product->discount_start_date && $now->lt($product->discount_start_date)) {
+        return round($basePrice, 2);
+    }
+    if ($product->discount_end_date && $now->gt($product->discount_end_date)) {
+        return round($basePrice, 2);
+    }
+    $discounted = $product->discount_type === 'percent'
+        ? $basePrice - ($basePrice * $discount / 100)
+        : $basePrice - $discount;
+    return round(max(0, $discounted), 2);
+}
     // ═══════════════════════════════════════════════════════════════
     // PRIVATE HELPER: Resolve a coupon code into a discount amount.
     // Only a fixed, server-known whitelist of codes is honored — the
@@ -281,53 +277,55 @@ class OrderController extends Controller
     // tax that ends up on the order.
     // ═══════════════════════════════════════════════════════════════
     private function resolveCheckoutItems(array $rawItems): array
-    {
-        $resolved = [];
-        foreach ($rawItems as $line) {
-            $product = Product::find($line['product_id']);
-            if (!$product) {
-                throw new Exception("Product #{$line['product_id']} no longer exists.");
-            }
-            $quantity = $line['quantity'] ?? 1;
-            $sizeStock = null;
-            if (!empty($line['product_size_stock_id'])) {
-                $sizeStock = ProductSizeStock::where('id', $line['product_size_stock_id'])->lockForUpdate()->first();
-                if (!$sizeStock) {
-                    throw new Exception("Selected size/stock for '{$product->name}' no longer exists.");
-                }
-                $availableStock = $this->clampStock($sizeStock->stock);
-                if ($availableStock <= 0) {
-                    throw new Exception("'{$product->name}' ({$sizeStock->size}) is out of stock.");
-                }
-                if ($availableStock < $quantity) {
-                    throw new Exception("Insufficient stock for '{$product->name}' ({$sizeStock->size}). Only {$availableStock} left.");
-                }
-            }
-
-            // Discounted, GST-inclusive price — the same number the
-            // customer saw on the product page and in their cart.
-            $unitPrice = $this->calculateEffectiveUnitPrice($product, $sizeStock);
-
-            $colorName = null;
-            $sizeName  = $sizeStock->size ?? null;
-            if (!empty($line['product_color_variant_id'])) {
-                $colorVariant = $product->colorVariants()->with('color')->find($line['product_color_variant_id']);
-                $colorName = $colorVariant->color->name ?? null;
-            }
-            $resolved[] = [
-                'product_id'                => $product->id,
-                'product_color_variant_id'  => $line['product_color_variant_id'] ?? null,
-                'product_size_stock_id'     => $sizeStock->id ?? null,
-                'product_name'              => $product->name,
-                'color'                     => $colorName,
-                'size'                      => $sizeName,
-                'price'                     => $unitPrice,
-                'quantity'                  => $quantity,
-                'total'                     => round($unitPrice * $quantity, 2),
-            ];
+{
+    $resolved = [];
+    foreach ($rawItems as $line) {
+        $product = Product::find($line['product_id']);
+        if (!$product) {
+            throw new Exception("Product #{$line['product_id']} no longer exists.");
         }
-        return $resolved;
+        $quantity = $line['quantity'] ?? 1;
+        $sizeStock = null;
+        if (!empty($line['product_size_stock_id'])) {
+            $sizeStock = ProductSizeStock::where('id', $line['product_size_stock_id'])->lockForUpdate()->first();
+            if (!$sizeStock) {
+                throw new Exception("Selected size/stock for '{$product->name}' no longer exists.");
+            }
+            $availableStock = $this->clampStock($sizeStock->stock);
+            if ($availableStock <= 0) {
+                throw new Exception("'{$product->name}' ({$sizeStock->size}) is out of stock.");
+            }
+            if ($availableStock < $quantity) {
+                throw new Exception("Insufficient stock for '{$product->name}' ({$sizeStock->size}). Only {$availableStock} left.");
+            }
+        }
+
+        $mrp = round((float) ($sizeStock->price ?? $product->unit_price ?? 0), 2);
+        $unitPrice = $this->calculateEffectiveUnitPrice($product, $sizeStock); // discounted price
+
+        $colorName = null;
+        $sizeName  = $sizeStock->size ?? null;
+        if (!empty($line['product_color_variant_id'])) {
+            $colorVariant = $product->colorVariants()->with('color')->find($line['product_color_variant_id']);
+            $colorName = $colorVariant->color->name ?? null;
+        }
+
+        $resolved[] = [
+            'product_id'                => $product->id,
+            'product_color_variant_id'  => $line['product_color_variant_id'] ?? null,
+            'product_size_stock_id'     => $sizeStock->id ?? null,
+            'product_name'              => $product->name,
+            'color'                     => $colorName,
+            'size'                      => $sizeName,
+            'mrp'                       => $mrp,
+            'mrp_total'                 => round($mrp * $quantity, 2),
+            'price'                     => $unitPrice,             // discounted unit price — stored on OrderItem
+            'quantity'                  => $quantity,
+            'total'                     => round($unitPrice * $quantity, 2), // discounted line total — stored on OrderItem
+        ];
     }
+    return $resolved;
+}
     // ═══════════════════════════════════════════════════════════════
     // POST /orders/checkout
     // ═══════════════════════════════════════════════════════════════
@@ -388,51 +386,59 @@ class OrderController extends Controller
             }
 
             $lines = $this->resolveCheckoutItems($rawItems);
-            $subtotal = round(array_sum(array_column($lines, 'total')), 2);
 
-            // Discount: only from a whitelisted coupon code, computed here.
-            [$couponCode, $discount] = $this->resolveCouponDiscount(
-                $validated['coupon_code'] ?? null,
-                $subtotal,
-            );
+// Spec #2: subtotal = sum of MRP × qty (pre-discount)
+$subtotal = round(array_sum(array_column($lines, 'mrp_total')), 2);
 
-            $taxableAmount = round($subtotal - $discount, 2);
+// Spec #3: product discount = sum of (mrp - discountedPrice) × qty
+$productDiscount = round($subtotal - array_sum(array_column($lines, 'total')), 2);
 
-            // Shipping: fixed business rule, not something the client can set.
-            $shippingCharge = ($taxableAmount >= self::FREE_SHIPPING_THRESHOLD || $taxableAmount <= 0)
-                ? 0.0
-                : self::SHIPPING_CHARGE;
+// Coupon discount (server-whitelisted only), applied on top of product discount
+[$couponCode, $couponDiscount] = $this->resolveCouponDiscount(
+    $validated['coupon_code'] ?? null,
+    round($subtotal - $productDiscount, 2),
+);
 
-            // GST is already included in product prices. `tax` is stored purely
-            // as an informational breakdown (reverse-extracted) — it is NOT
-            // added to `amount`, or the customer would be charged GST twice.
-            $tax = round($taxableAmount - ($taxableAmount / (1 + self::GST_RATE)), 2);
+$discount = round($productDiscount + $couponDiscount, 2);
 
-            $amount = round($taxableAmount + $shippingCharge, 2);
+// Spec #4: taxable amount = subtotal - discount
+$taxableAmount = round($subtotal - $discount, 2);
 
-            if ($amount < 0) {
-                DB::rollBack();
-                return response()->json(['status' => 'error', 'message' => 'Discount cannot exceed order subtotal.'], 422);
-            }
+// Spec #6: shipping
+$shippingCharge = ($taxableAmount >= self::FREE_SHIPPING_THRESHOLD || $taxableAmount <= 0)
+    ? 0.0
+    : self::SHIPPING_CHARGE;
 
-            $order = Order::create([
-                'order_id'         => $this->generateOrderId(),
-                'customer_id'      => $userId,
-                'customer_name'    => $validated['customer_name'],
-                'customer_email'   => $validated['customer_email'],
-                'customer_phone'   => $validated['customer_phone'] ?? null,
-                'seller_name'      => $validated['seller_name'] ?? null,
-                'amount'           => $amount,
-                'subtotal'         => $subtotal,
-                'discount'         => $discount,
-                'shipping'         => $shippingCharge,
-                'tax'              => $tax,
-                'delivery_status'  => 'Pending',
-                'payment_method'   => $validated['payment_method'],
-                'payment_status'   => 'Pending',
-                'shipping_address' => $validated['shipping_address'],
-                'billing_address'  => $validated['billing_address'] ?? null,
-            ]);
+// Spec #5: tax is FRESH, additive — NOT reverse-extracted from an inclusive price.
+// This is the one line that was wrong before: taxableAmount - taxableAmount/1.18
+$tax = round($taxableAmount * self::GST_RATE, 2);
+
+// Spec #7: final amount
+$amount = round($taxableAmount + $tax + $shippingCharge, 2);
+
+if ($amount < 0) {
+    DB::rollBack();
+    return response()->json(['status' => 'error', 'message' => 'Discount cannot exceed order subtotal.'], 422);
+}
+
+           $order = Order::create([
+    'order_id'         => $this->generateOrderId(),
+    'customer_id'      => $userId,
+    'customer_name'    => $validated['customer_name'],
+    'customer_email'   => $validated['customer_email'],
+    'customer_phone'   => $validated['customer_phone'] ?? null,
+    'seller_name'      => $validated['seller_name'] ?? null,
+    'amount'           => $amount,
+    'subtotal'         => $subtotal,
+    'discount'         => $discount,
+    'shipping'         => $shippingCharge,
+    'tax'              => $tax,
+    'delivery_status'  => 'Pending',
+    'payment_method'   => $validated['payment_method'],
+    'payment_status'   => 'Pending',
+    'shipping_address' => $validated['shipping_address'],
+    'billing_address'  => $validated['billing_address'] ?? null,
+]);
             // Link this order to a pre-created Razorpay Transaction
             // (from PaymentController::createOrder), so verifyPayment()
             // can later find it and update payment_status correctly.
