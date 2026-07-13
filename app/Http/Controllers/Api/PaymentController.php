@@ -28,8 +28,8 @@ class PaymentController extends Controller
             ], 422);
         }
         try {
-            $keyId = env('RAZORPAY_KEY_ID');
-            $keySecret = env('RAZORPAY_KEY_SECRET');
+            $keyId = config('services.razorpay.key');
+$keySecret = config('services.razorpay.secret');
             if (empty($keyId) || empty($keySecret)) {
                 return response()->json([
                     'status' => 'error',
@@ -108,8 +108,10 @@ class PaymentController extends Controller
             ], 422);
         }
         try {
-            $keySecret = env('RAZORPAY_KEY_SECRET');
-            if (empty($keySecret)) {
+		            $keyId = config('services.razorpay.key');
+$keySecret = config('services.razorpay.secret');
+
+		if (empty($keySecret)) {
                 return response()->json([
                     'status' => 'error',
                     'message' => 'Razorpay API credentials are not configured on the server.'
