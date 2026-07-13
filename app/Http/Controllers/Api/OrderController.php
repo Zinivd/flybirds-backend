@@ -1,6 +1,5 @@
 <?php
 namespace App\Http\Controllers\Api;
-
 use App\Http\Controllers\Controller;
 use App\Models\Order;
 use App\Models\OrderItem;
@@ -16,12 +15,23 @@ use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Exception;
 use App\Mail\InvoiceMail;
 use Illuminate\Support\Facades\Mail;
-
 class OrderController extends Controller
 {
     private const DELIVERY_STATUSES = ['Packed', 'Shipped', 'Out For Delivery', 'Delivered', 'Cancelled', 'Refunded'];
     private const PAYMENT_STATUSES   = ['Pending', 'Paid', 'Failed', 'Refunded'];
     private const NON_CANCELLABLE_STATUSES = ['Delivered', 'Cancelled', 'Refunded'];
+
+    // Pricing rules — kept identical to the frontend cart so the number the
+    // customer sees at checkout is exactly the number that gets charged.
+    // Product prices are GST-inclusive, so GST is never added on top here.
+    private const FREE_SHIPPING_THRESHOLD = 999.0;
+    private const SHIPPING_CHARGE = 49.0;
+    private const GST_RATE = 0.18;
+    private const COUPONS = [
+        'SAVE10' => 10,
+        'SAVE20' => 20,
+        'FLAT50' => 50,
+    ];
 
     // Relations needed to expose full product/category/image details on order items
     private const ITEM_DETAIL_RELATIONS = [
@@ -32,7 +42,6 @@ class OrderController extends Controller
         'items.productColorVariant.thumbnailImage',
         'items.productSizeStock',
     ];
-
     // ═══════════════════════════════════════════════════════════════
     // PRIVATE HELPER: Generate unique 18-char order ID
     // Format: FLYODR-MMDD&A00001  (rolls to B00001 after 99999, etc.)
@@ -56,16 +65,13 @@ class OrderController extends Controller
             ]);
             return $next;
         });
-
         $batch     = intdiv($current - 1, 99999);
         $remainder = (($current - 1) % 99999) + 1;
         $letter    = chr(65 + ($batch % 26));
         $datePart  = now()->format('md');
         $seqPart   = $letter . str_pad((string) $remainder, 5, '0', STR_PAD_LEFT);
-
         return 'FLYODR-' . $datePart . '&' . $seqPart;
     }
-
     // ═══════════════════════════════════════════════════════════════
     // PRIVATE HELPER: Generate a unique sequential invoice number.
     // Format: INV-00001, INV-00002, ...
@@ -89,10 +95,8 @@ class OrderController extends Controller
             ]);
             return $next;
         });
-
         return 'INV-' . str_pad((string) $next, 5, '0', STR_PAD_LEFT);
     }
-
     // ═══════════════════════════════════════════════════════════════
     // PRIVATE HELPER: Clamp any stock number so it's never negative.
     // ═══════════════════════════════════════════════════════════════
@@ -100,7 +104,6 @@ class OrderController extends Controller
     {
         return max(0, (int) $stock);
     }
-
     // ═══════════════════════════════════════════════════════════════
     // PRIVATE HELPER: Atomically decrement stock without going below zero.
     // ═══════════════════════════════════════════════════════════════
@@ -110,10 +113,54 @@ class OrderController extends Controller
             ->where('id', $sizeStockId)
             ->where('stock', '>=', $quantity)
             ->decrement('stock', $quantity);
-
         return $affected > 0;
     }
+    // ═══════════════════════════════════════════════════════════════
+    // PRIVATE HELPER: Compute the true, discounted, GST-inclusive unit
+    // price to charge for a line item — mirrors how `effective_price`
+    // is derived for product listing/detail endpoints. NEVER trust a
+    // client-supplied price; always recompute it here from the product
+    // and (if present) its size-stock override, honoring the discount
+    // window (discount_start_date / discount_end_date).
+    // ═══════════════════════════════════════════════════════════════
+    private function calculateEffectiveUnitPrice(Product $product, ?ProductSizeStock $sizeStock): float
+    {
+        $basePrice = (float) ($sizeStock->price ?? $product->unit_price ?? 0);
 
+        $discount = (float) ($product->discount ?? 0);
+        if ($discount <= 0) {
+            return round($basePrice, 2);
+        }
+
+        $now = now();
+        if ($product->discount_start_date && $now->lt($product->discount_start_date)) {
+            return round($basePrice, 2);
+        }
+        if ($product->discount_end_date && $now->gt($product->discount_end_date)) {
+            return round($basePrice, 2);
+        }
+
+        $discounted = $product->discount_type === 'percent'
+            ? $basePrice - ($basePrice * $discount / 100)
+            : $basePrice - $discount;
+
+        return round(max(0, $discounted), 2);
+    }
+    // ═══════════════════════════════════════════════════════════════
+    // PRIVATE HELPER: Resolve a coupon code into a discount amount.
+    // Only a fixed, server-known whitelist of codes is honored — the
+    // client can never dictate the discount amount directly.
+    // ═══════════════════════════════════════════════════════════════
+    private function resolveCouponDiscount(?string $couponCode, float $subtotal): array
+    {
+        $code = strtoupper(trim((string) $couponCode));
+        if ($code === '' || !isset(self::COUPONS[$code])) {
+            return [null, 0.0];
+        }
+        $percent = self::COUPONS[$code];
+        $discount = round(($subtotal * $percent) / 100, 2);
+        return [$code, $discount];
+    }
     // ═══════════════════════════════════════════════════════════════
     // PRIVATE HELPER: Attach full product/category/image detail to
     // every OrderItem on a single Order, a plain collection of Orders,
@@ -127,22 +174,18 @@ class OrderController extends Controller
         $orders = $isPaginator
             ? $orderOrOrders->getCollection()
             : ($orderOrOrders instanceof \Illuminate\Support\Collection ? $orderOrOrders : collect([$orderOrOrders]));
-
         foreach ($orders as $order) {
             if (!$order->relationLoaded('items')) {
                 continue;
             }
-
             $order->items->each(function ($item) {
                 $product = $item->relationLoaded('product') ? $item->product : null;
                 $colorVariant = $item->relationLoaded('productColorVariant') ? $item->productColorVariant : null;
                 $sizeStock = $item->relationLoaded('productSizeStock') ? $item->productSizeStock : null;
-
                 $thumbnail = $colorVariant->thumbnailImage->image_url ?? null;
                 $gallery = ($colorVariant && $colorVariant->galleryImages)
                     ? $colorVariant->galleryImages->pluck('image_url')->values()
                     : collect([]);
-
                 $item->setAttribute('product_details', [
                     'product_id'   => $product->id ?? $item->product_id,
                     'name'         => $product->name ?? $item->product_name,
@@ -177,10 +220,8 @@ class OrderController extends Controller
                 ]);
             });
         }
-
         return $orderOrOrders;
     }
-
     // ═══════════════════════════════════════════════════════════════
     // GET /orders/check-stock?product_id=5&product_size_stock_id=34&quantity=2
     // ═══════════════════════════════════════════════════════════════
@@ -199,19 +240,15 @@ class OrderController extends Controller
                 'errors'  => $e->errors(),
             ], 422);
         }
-
         try {
             $product = Product::find($validated['product_id']);
             $requestedQty = $validated['quantity'] ?? 1;
-
             if (!empty($validated['product_size_stock_id'])) {
                 $sizeStock = ProductSizeStock::find($validated['product_size_stock_id']);
                 if (!$sizeStock) {
                     return response()->json(['status' => 'error', 'message' => 'Size/stock variant not found.'], 404);
                 }
-
                 $available = $this->clampStock($sizeStock->stock);
-
                 return response()->json([
                     'status' => 'success',
                     'data'   => [
@@ -225,7 +262,6 @@ class OrderController extends Controller
                     ],
                 ], 200);
             }
-
             return response()->json([
                 'status' => 'success',
                 'data'   => [
@@ -238,29 +274,27 @@ class OrderController extends Controller
             return response()->json(['status' => 'error', 'message' => 'Failed to check stock.'], 500);
         }
     }
-
     // ═══════════════════════════════════════════════════════════════
-    // PRIVATE HELPER: Resolve the checkout line items.
+    // PRIVATE HELPER: Resolve the checkout line items. Prices are ALWAYS
+    // recomputed server-side from the product/size-stock records — a
+    // client can never dictate the unit price, discount, shipping, or
+    // tax that ends up on the order.
     // ═══════════════════════════════════════════════════════════════
     private function resolveCheckoutItems(array $rawItems): array
     {
         $resolved = [];
-
         foreach ($rawItems as $line) {
             $product = Product::find($line['product_id']);
             if (!$product) {
                 throw new Exception("Product #{$line['product_id']} no longer exists.");
             }
-
             $quantity = $line['quantity'] ?? 1;
             $sizeStock = null;
-
             if (!empty($line['product_size_stock_id'])) {
                 $sizeStock = ProductSizeStock::where('id', $line['product_size_stock_id'])->lockForUpdate()->first();
                 if (!$sizeStock) {
                     throw new Exception("Selected size/stock for '{$product->name}' no longer exists.");
                 }
-
                 $availableStock = $this->clampStock($sizeStock->stock);
                 if ($availableStock <= 0) {
                     throw new Exception("'{$product->name}' ({$sizeStock->size}) is out of stock.");
@@ -270,15 +304,16 @@ class OrderController extends Controller
                 }
             }
 
-            $unitPrice = $sizeStock->price ?? $product->unit_price ?? 0;
+            // Discounted, GST-inclusive price — the same number the
+            // customer saw on the product page and in their cart.
+            $unitPrice = $this->calculateEffectiveUnitPrice($product, $sizeStock);
+
             $colorName = null;
             $sizeName  = $sizeStock->size ?? null;
-
             if (!empty($line['product_color_variant_id'])) {
                 $colorVariant = $product->colorVariants()->with('color')->find($line['product_color_variant_id']);
                 $colorName = $colorVariant->color->name ?? null;
             }
-
             $resolved[] = [
                 'product_id'                => $product->id,
                 'product_color_variant_id'  => $line['product_color_variant_id'] ?? null,
@@ -288,13 +323,11 @@ class OrderController extends Controller
                 'size'                      => $sizeName,
                 'price'                     => $unitPrice,
                 'quantity'                  => $quantity,
-                'total'                     => $unitPrice * $quantity,
+                'total'                     => round($unitPrice * $quantity, 2),
             ];
         }
-
         return $resolved;
     }
-
     // ═══════════════════════════════════════════════════════════════
     // POST /orders/checkout
     // ═══════════════════════════════════════════════════════════════
@@ -310,9 +343,11 @@ class OrderController extends Controller
                 'payment_method'   => 'required|string|max:50',
                 'shipping_address' => 'required|string',
                 'billing_address'  => 'nullable|string',
-                'discount'         => 'nullable|numeric|min:0',
-                'shipping_charge'  => 'nullable|numeric|min:0',
-                'tax'              => 'nullable|numeric|min:0',
+                // Discount, shipping, and tax are NEVER accepted from the
+                // client — they are always recomputed below. Only a coupon
+                // *code* (validated against a server-side whitelist) may
+                // be supplied.
+                'coupon_code'      => 'nullable|string|max:30',
                 'transaction_id'   => 'nullable|exists:transactions,id',
                 'items'                              => 'sometimes|array|min:1',
                 'items.*.product_id'                 => 'required_with:items|exists:products,id',
@@ -327,24 +362,20 @@ class OrderController extends Controller
                 'errors'  => $e->errors(),
             ], 422);
         }
-
         DB::beginTransaction();
         try {
             $userId = $validated['user_id'];
             $usedCart = false;
-
             if (!empty($validated['items'])) {
                 $rawItems = $validated['items'];
             } else {
                 $cartItems = CartWishlistData::where('user_id', $userId)
                     ->where('type', 'cart')
                     ->get();
-
                 if ($cartItems->isEmpty()) {
                     DB::rollBack();
                     return response()->json(['status' => 'error', 'message' => 'Cart is empty.'], 422);
                 }
-
                 $rawItems = $cartItems->map(function ($item) {
                     return [
                         'product_id'               => $item->product_id,
@@ -353,16 +384,31 @@ class OrderController extends Controller
                         'quantity'                 => $item->quantity,
                     ];
                 })->toArray();
-
                 $usedCart = true;
             }
 
             $lines = $this->resolveCheckoutItems($rawItems);
-            $subtotal = array_sum(array_column($lines, 'total'));
-            $discount = $validated['discount'] ?? 0;
-            $shippingCharge = $validated['shipping_charge'] ?? 0;
-            $tax = $validated['tax'] ?? 0;
-            $amount = $subtotal - $discount + $shippingCharge + $tax;
+            $subtotal = round(array_sum(array_column($lines, 'total')), 2);
+
+            // Discount: only from a whitelisted coupon code, computed here.
+            [$couponCode, $discount] = $this->resolveCouponDiscount(
+                $validated['coupon_code'] ?? null,
+                $subtotal,
+            );
+
+            $taxableAmount = round($subtotal - $discount, 2);
+
+            // Shipping: fixed business rule, not something the client can set.
+            $shippingCharge = ($taxableAmount >= self::FREE_SHIPPING_THRESHOLD || $taxableAmount <= 0)
+                ? 0.0
+                : self::SHIPPING_CHARGE;
+
+            // GST is already included in product prices. `tax` is stored purely
+            // as an informational breakdown (reverse-extracted) — it is NOT
+            // added to `amount`, or the customer would be charged GST twice.
+            $tax = round($taxableAmount - ($taxableAmount / (1 + self::GST_RATE)), 2);
+
+            $amount = round($taxableAmount + $shippingCharge, 2);
 
             if ($amount < 0) {
                 DB::rollBack();
@@ -387,7 +433,6 @@ class OrderController extends Controller
                 'shipping_address' => $validated['shipping_address'],
                 'billing_address'  => $validated['billing_address'] ?? null,
             ]);
-
             // Link this order to a pre-created Razorpay Transaction
             // (from PaymentController::createOrder), so verifyPayment()
             // can later find it and update payment_status correctly.
@@ -396,7 +441,6 @@ class OrderController extends Controller
                     ->whereNull('order_table_id')
                     ->update(['order_table_id' => $order->id]);
             }
-
             foreach ($lines as $line) {
                 OrderItem::create([
                     'order_table_id'            => $order->id,
@@ -410,7 +454,6 @@ class OrderController extends Controller
                     'quantity'                  => $line['quantity'],
                     'total'                     => $line['total'],
                 ]);
-
                 if ($line['product_size_stock_id']) {
                     $success = $this->decrementStockSafely($line['product_size_stock_id'], $line['quantity']);
                     if (!$success) {
@@ -418,13 +461,10 @@ class OrderController extends Controller
                     }
                 }
             }
-
             if ($usedCart) {
                 CartWishlistData::where('user_id', $userId)->where('type', 'cart')->delete();
             }
-
             DB::commit();
-
             return response()->json([
                 'status'  => 'success',
                 'message' => 'Order placed successfully.',
@@ -439,7 +479,6 @@ class OrderController extends Controller
             ], 500);
         }
     }
-
     // ═══════════════════════════════════════════════════════════════
     // GET /orders  — Admin list with search & filtering
     // ═══════════════════════════════════════════════════════════════
@@ -447,7 +486,6 @@ class OrderController extends Controller
     {
         try {
             $query = Order::with(array_merge(['items'], self::ITEM_DETAIL_RELATIONS));
-
             if ($request->filled('search')) {
                 $search = $request->search;
                 $query->where(function ($q) use ($search) {
@@ -461,7 +499,6 @@ class OrderController extends Controller
                       ->orWhere('payment_status', 'like', "%{$search}%");
                 });
             }
-
             if ($request->filled('delivery_status')) {
                 $query->where('delivery_status', $request->delivery_status);
             }
@@ -474,19 +511,15 @@ class OrderController extends Controller
             if ($request->filled('date_to')) {
                 $query->whereDate('created_at', '<=', $request->date_to);
             }
-
             $perPage = (int) $request->query('per_page', 20);
             $orders = $query->orderBy('created_at', 'desc')->paginate($perPage > 0 ? $perPage : 20);
-
             $this->attachFullItemDetails($orders);
-
             return response()->json(['status' => 'success', 'data' => $orders], 200);
         } catch (Exception $e) {
             Log::error('Order Index Error: ' . $e->getMessage());
             return response()->json(['status' => 'error', 'message' => 'Failed to retrieve orders.'], 500);
         }
     }
-
     // ═══════════════════════════════════════════════════════════════
     // GET /orders/{id}  — Admin order detail
     // ═══════════════════════════════════════════════════════════════
@@ -495,7 +528,6 @@ class OrderController extends Controller
         try {
             $order = Order::with(array_merge(['items', 'customer'], self::ITEM_DETAIL_RELATIONS))->findOrFail($id);
             $this->attachFullItemDetails($order);
-
             return response()->json(['status' => 'success', 'data' => $order], 200);
         } catch (ModelNotFoundException $e) {
             return response()->json(['status' => 'error', 'message' => 'Order not found.'], 404);
@@ -504,7 +536,6 @@ class OrderController extends Controller
             return response()->json(['status' => 'error', 'message' => 'Failed to retrieve order details.'], 500);
         }
     }
-
     // ═══════════════════════════════════════════════════════════════
     // GET /users/{userId}/orders  — Customer's own order history
     // ═══════════════════════════════════════════════════════════════
@@ -512,21 +543,17 @@ class OrderController extends Controller
     {
         try {
             $query = Order::with(array_merge(['items'], self::ITEM_DETAIL_RELATIONS))->where('customer_id', $userId);
-
             if ($request->filled('delivery_status')) {
                 $query->where('delivery_status', $request->delivery_status);
             }
-
             $orders = $query->orderBy('created_at', 'desc')->get();
             $this->attachFullItemDetails($orders);
-
             return response()->json(['status' => 'success', 'data' => $orders], 200);
         } catch (Exception $e) {
             Log::error('My Orders Error: ' . $e->getMessage());
             return response()->json(['status' => 'error', 'message' => 'Failed to retrieve your orders.'], 500);
         }
     }
-
     // ═══════════════════════════════════════════════════════════════
     // PRIVATE HELPER: Build the invoice data array for a given order.
     // Used by invoice(), invoiceMail(), and sendInvoiceEmail().
@@ -538,14 +565,11 @@ class OrderController extends Controller
             $order->invoice_date   = now();
             $order->save();
         }
-
         $company = config('company', []);
-
         $items = $order->items->map(function ($item) {
             $description = $item->product_name;
             if ($item->color) $description .= ' - ' . $item->color;
             if ($item->size)  $description .= ' (' . $item->size . ')';
-
             return [
                 'description' => $description,
                 'sku'         => $item->productSizeStock->sku ?? null,
@@ -554,7 +578,6 @@ class OrderController extends Controller
                 'amount'      => (float) $item->total,
             ];
         })->values();
-
         return [
             'company' => [
                 'name'           => $company['name'] ?? 'Flybirds',
@@ -593,7 +616,6 @@ class OrderController extends Controller
             'total'           => (float) $order->amount,
         ];
     }
-
     // ═══════════════════════════════════════════════════════════════
     // GET /orders/{id}/invoice
     // Returns invoice JSON data for the frontend Angular view to render.
@@ -605,7 +627,6 @@ class OrderController extends Controller
         } catch (ModelNotFoundException $e) {
             return response()->json(['status' => 'error', 'message' => 'Order not found.'], 404);
         }
-
         try {
             $data = $this->buildInvoiceData($order);
             return response()->json(['status' => 'success', 'data' => $data], 200);
@@ -614,7 +635,6 @@ class OrderController extends Controller
             return response()->json(['status' => 'error', 'message' => 'Failed to generate invoice.'], 500);
         }
     }
-
     // ═══════════════════════════════════════════════════════════════
     // POST /orders/{id}/invoice-mail
     // Generates the invoice PDF and emails it to the customer on demand.
@@ -626,11 +646,9 @@ class OrderController extends Controller
         } catch (ModelNotFoundException $e) {
             return response()->json(['status' => 'error', 'message' => 'Order not found.'], 404);
         }
-
         try {
             $data = $this->buildInvoiceData($order);
             Mail::to($order->customer_email)->send(new InvoiceMail($order, $data));
-
             return response()->json([
                 'status'  => 'success',
                 'message' => 'Invoice emailed to ' . $order->customer_email,
@@ -640,7 +658,6 @@ class OrderController extends Controller
             return response()->json(['status' => 'error', 'message' => 'Failed to send invoice email.'], 500);
         }
     }
-
     // ═══════════════════════════════════════════════════════════════
     // PRIVATE HELPER: Silently send the invoice email (used internally
     // after a payment status transitions to 'Paid'). Never throws —
@@ -656,7 +673,6 @@ class OrderController extends Controller
             Log::error('Invoice Email Error (Order #' . $order->id . '): ' . $e->getMessage());
         }
     }
-
     // ═══════════════════════════════════════════════════════════════
     // PATCH /orders/{id}/status
     // ═══════════════════════════════════════════════════════════════
@@ -666,24 +682,20 @@ class OrderController extends Controller
             'delivery_status' => 'sometimes|string|in:' . implode(',', self::DELIVERY_STATUSES),
             'payment_status'  => 'sometimes|string|in:' . implode(',', self::PAYMENT_STATUSES),
         ]);
-
         if ($validator->fails()) {
             return response()->json(['status' => 'error', 'errors' => $validator->errors()], 422);
         }
-
         if (!$request->filled('delivery_status') && !$request->filled('payment_status')) {
             return response()->json([
                 'status'  => 'error',
                 'message' => 'Provide at least one of delivery_status or payment_status.',
             ], 422);
         }
-
         try {
             $order = Order::findOrFail($id);
         } catch (ModelNotFoundException $e) {
             return response()->json(['status' => 'error', 'message' => 'Order not found.'], 404);
         }
-
         if (in_array($order->delivery_status, self::NON_CANCELLABLE_STATUSES) && $request->filled('delivery_status')) {
             if ($order->delivery_status !== $request->delivery_status) {
                 return response()->json([
@@ -692,25 +704,18 @@ class OrderController extends Controller
                 ], 422);
             }
         }
-
         try {
-    $wasPaid = $order->payment_status === 'Paid';
-
-    if ($request->filled('delivery_status')) {
-        $order->delivery_status = $request->delivery_status;
-    }
-    if ($request->filled('payment_status')) {
-        $order->payment_status = $request->payment_status;
-    }
-    $order->save();
-
-    Log::info("DEBUG: wasPaid={$wasPaid}, nowPaid=" . ($order->payment_status === 'Paid' ? 'yes' : 'no'));
-
-    if (!$wasPaid && $order->payment_status === 'Paid') {
-        Log::info("DEBUG: triggering sendInvoiceEmail for order {$order->id}");
-        $this->sendInvoiceEmail($order->fresh());
-    }
-
+            $wasPaid = $order->payment_status === 'Paid';
+            if ($request->filled('delivery_status')) {
+                $order->delivery_status = $request->delivery_status;
+            }
+            if ($request->filled('payment_status')) {
+                $order->payment_status = $request->payment_status;
+            }
+            $order->save();
+            if (!$wasPaid && $order->payment_status === 'Paid') {
+                $this->sendInvoiceEmail($order->fresh());
+            }
             return response()->json([
                 'status'  => 'success',
                 'message' => 'Order status updated successfully.',
@@ -721,7 +726,6 @@ class OrderController extends Controller
             return response()->json(['status' => 'error', 'message' => 'Failed to update order status.'], 500);
         }
     }
-
     // ═══════════════════════════════════════════════════════════════
     // POST /orders/{id}/cancel
     // ═══════════════════════════════════════════════════════════════
@@ -732,14 +736,12 @@ class OrderController extends Controller
         } catch (ModelNotFoundException $e) {
             return response()->json(['status' => 'error', 'message' => 'Order not found.'], 404);
         }
-
         if (in_array($order->delivery_status, self::NON_CANCELLABLE_STATUSES)) {
             return response()->json([
                 'status'  => 'error',
                 'message' => "Order cannot be cancelled because it is already '{$order->delivery_status}'.",
             ], 422);
         }
-
         DB::beginTransaction();
         try {
             foreach ($order->items as $item) {
@@ -752,15 +754,12 @@ class OrderController extends Controller
                     }
                 }
             }
-
             $order->delivery_status = 'Cancelled';
             if ($order->payment_status === 'Paid') {
                 $order->payment_status = 'Refunded';
             }
             $order->save();
-
             DB::commit();
-
             return response()->json([
                 'status'  => 'success',
                 'message' => 'Order cancelled successfully.',
@@ -772,7 +771,6 @@ class OrderController extends Controller
             return response()->json(['status' => 'error', 'message' => 'Failed to cancel order.'], 500);
         }
     }
-
     // ═══════════════════════════════════════════════════════════════
     // DELETE /orders/{id}
     // ═══════════════════════════════════════════════════════════════
@@ -781,7 +779,6 @@ class OrderController extends Controller
         try {
             $order = Order::findOrFail($id);
             $order->delete();
-
             return response()->json(['status' => 'success', 'message' => 'Order deleted successfully.'], 200);
         } catch (ModelNotFoundException $e) {
             return response()->json(['status' => 'error', 'message' => 'Order not found.'], 404);

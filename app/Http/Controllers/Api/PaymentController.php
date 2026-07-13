@@ -8,16 +8,24 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
 use Exception;
-
 class PaymentController extends Controller
 {
     /**
      * POST: Create a Razorpay Order
+     *
+     * IMPORTANT: when `order_table_id` is supplied, the amount charged is
+     * ALWAYS pulled from that Order's own `amount` column — never from the
+     * client-supplied `amount` field. Trusting a client-supplied amount here
+     * lets a caller create a Razorpay order for any figure they like while
+     * the order record (and the goods being shipped) reflect a different,
+     * higher figure — silently under-collecting payment. `amount` from the
+     * request is only used as a fallback for ad-hoc payments that aren't
+     * tied to an order yet.
      */
     public function createOrder(Request $request)
     {
         $validator = Validator::make($request->all(), [
-            'amount' => 'required|numeric|min:1',
+            'amount' => 'sometimes|numeric|min:1',
             'currency' => 'sometimes|string|max:10',
             'order_table_id' => 'sometimes|exists:orders,id',
         ]);
@@ -29,16 +37,48 @@ class PaymentController extends Controller
         }
         try {
             $keyId = config('services.razorpay.key');
-$keySecret = config('services.razorpay.secret');
+            $keySecret = config('services.razorpay.secret');
             if (empty($keyId) || empty($keySecret)) {
                 return response()->json([
                     'status' => 'error',
                     'message' => 'Razorpay API credentials are not configured on the server.'
                 ], 500);
             }
-            $amount = $request->amount;
+
             $currency = $request->input('currency', 'INR');
             $orderTableId = $request->input('order_table_id');
+            $order = null;
+
+            if ($orderTableId) {
+                $order = Order::find($orderTableId);
+                if (!$order) {
+                    return response()->json([
+                        'status' => 'error',
+                        'message' => 'Order not found.'
+                    ], 404);
+                }
+                if ($order->payment_status === 'Paid') {
+                    return response()->json([
+                        'status' => 'error',
+                        'message' => 'This order has already been paid for.'
+                    ], 422);
+                }
+                // Authoritative amount — ignores whatever the client sent.
+                $amount = (float) $order->amount;
+
+                if ($request->filled('amount') && abs((float) $request->amount - $amount) > 0.01) {
+                    Log::warning("PaymentController::createOrder — client-supplied amount ({$request->amount}) did not match Order #{$order->id} amount ({$amount}). Using the order's amount.");
+                }
+            } else {
+                if (!$request->filled('amount')) {
+                    return response()->json([
+                        'status' => 'error',
+                        'message' => 'amount is required when order_table_id is not provided.'
+                    ], 422);
+                }
+                $amount = (float) $request->amount;
+            }
+
             $amountInPaise = intval(round($amount * 100));
             $response = Http::withBasicAuth($keyId, $keySecret)
                 ->post('https://api.razorpay.com/v1/orders', [
@@ -89,7 +129,6 @@ $keySecret = config('services.razorpay.secret');
             ], 500);
         }
     }
-
     /**
      * POST: Verify Razorpay Payment Signature
      */
@@ -108,10 +147,9 @@ $keySecret = config('services.razorpay.secret');
             ], 422);
         }
         try {
-		            $keyId = config('services.razorpay.key');
-$keySecret = config('services.razorpay.secret');
-
-		if (empty($keySecret)) {
+            $keyId = config('services.razorpay.key');
+            $keySecret = config('services.razorpay.secret');
+            if (empty($keySecret)) {
                 return response()->json([
                     'status' => 'error',
                     'message' => 'Razorpay API credentials are not configured on the server.'
@@ -120,18 +158,13 @@ $keySecret = config('services.razorpay.secret');
             $razorpayOrderId = $request->razorpay_order_id;
             $razorpayPaymentId = $request->razorpay_payment_id;
             $razorpaySignature = $request->razorpay_signature;
-
             $expectedSignature = hash_hmac('sha256', $razorpayOrderId . '|' . $razorpayPaymentId, $keySecret);
-
             $transaction = Transaction::where('razorpay_order_id', $razorpayOrderId)->first();
-
             $fallbackOrderTableId = $request->input('order_table_id');
             if ($transaction && !$transaction->order_table_id && $fallbackOrderTableId) {
                 $transaction->order_table_id = $fallbackOrderTableId;
             }
-
             $resolvedOrderTableId = $transaction->order_table_id ?? $fallbackOrderTableId ?? null;
-
             if (hash_equals($expectedSignature, $razorpaySignature)) {
                 if ($transaction) {
                     $transaction->razorpay_payment_id = $razorpayPaymentId;
@@ -142,10 +175,18 @@ $keySecret = config('services.razorpay.secret');
                     ]);
                     $transaction->save();
                 }
-
                 if ($resolvedOrderTableId) {
                     $order = Order::find($resolvedOrderTableId);
                     if ($order) {
+                        // Safety net: since createOrder() now always sources the
+                        // Razorpay amount from Order->amount, these should never
+                        // drift apart. If they ever do (e.g. legacy transaction,
+                        // manual DB edit), log it loudly for manual reconciliation
+                        // rather than silently marking the order Paid as if
+                        // everything were fine.
+                        if ($transaction && abs((float) $transaction->amount - (float) $order->amount) > 0.01) {
+                            Log::warning("Verify Payment: AMOUNT MISMATCH for Order #{$order->id}. Transaction amount collected: {$transaction->amount}, Order amount on record: {$order->amount}. Flagging for manual review.");
+                        }
                         $order->update(['payment_status' => 'Paid']);
                     } else {
                         Log::warning("Verify Payment: order_table_id {$resolvedOrderTableId} not found while marking Paid.");
@@ -153,7 +194,6 @@ $keySecret = config('services.razorpay.secret');
                 } else {
                     Log::warning("Verify Payment: no order_table_id resolvable for razorpay_order_id {$razorpayOrderId}. Payment verified but no order updated.");
                 }
-
                 return response()->json([
                     'status' => 'success',
                     'message' => 'Payment verified successfully.',
@@ -173,14 +213,12 @@ $keySecret = config('services.razorpay.secret');
                     ]);
                     $transaction->save();
                 }
-
                 if ($resolvedOrderTableId) {
                     $order = Order::find($resolvedOrderTableId);
                     if ($order) {
                         $order->update(['payment_status' => 'Failed']);
                     }
                 }
-
                 return response()->json([
                     'status' => 'error',
                     'message' => 'Payment signature verification failed.'
