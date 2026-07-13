@@ -1,4 +1,5 @@
 <?php
+
 namespace App\Http\Controllers\Api\Admin;
 
 use App\Http\Controllers\Controller;
@@ -37,14 +38,12 @@ class ProductController extends Controller
     private function attachWishlistFlag(Product $product, $userId = null): Product
     {
         $isWishlisted = false;
-
         if ($userId) {
             $isWishlisted = CartWishlistData::where('user_id', $userId)
                 ->where('product_id', $product->id)
                 ->where('type', 'wishlist')
                 ->exists();
         }
-
         $product->setAttribute('is_wishlisted', $isWishlisted);
         return $product;
     }
@@ -56,7 +55,6 @@ class ProductController extends Controller
     private function attachWishlistFlagToCollection($products, $userId = null)
     {
         $wishlistedIds = [];
-
         if ($userId) {
             $productIds = collect($products->items ?? $products)->pluck('id')->toArray();
             if (method_exists($products, 'items')) {
@@ -64,27 +62,62 @@ class ProductController extends Controller
             } else {
                 $productIds = collect($products)->pluck('id')->toArray();
             }
-
             $wishlistedIds = CartWishlistData::where('user_id', $userId)
                 ->where('type', 'wishlist')
                 ->whereIn('product_id', $productIds)
                 ->pluck('product_id')
                 ->toArray();
         }
-
         $items = method_exists($products, 'getCollection') ? $products->getCollection() : $products;
-
         $items->transform(function ($product) use ($wishlistedIds) {
             $product->setAttribute('is_wishlisted', in_array($product->id, $wishlistedIds));
             return $product;
         });
-
         return $products;
     }
 
     // ═══════════════════════════════════════════════════════════════
+    // PRIVATE HELPER: Turn a query param into a clean array of integer IDs.
+    // Accepts either a single value ("2") or a comma-separated list ("2,5,9")
+    // or an actual array (?category_id[]=2&category_id[]=5).
+    // ═══════════════════════════════════════════════════════════════
+    private function toIdArray($value): array
+    {
+        if (is_array($value)) {
+            $items = $value;
+        } else {
+            $items = explode(',', (string) $value);
+        }
+        return array_values(array_filter(array_map(function ($v) {
+            $v = trim((string) $v);
+            return $v !== '' && is_numeric($v) ? (int) $v : null;
+        }, $items), fn($v) => $v !== null));
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // PRIVATE HELPER: Turn a query param into a clean array of trimmed strings.
+    // Accepts either a single value ("S") or a comma-separated list ("S,L,XL")
+    // or an actual array.
+    // ═══════════════════════════════════════════════════════════════
+    private function toStringArray($value): array
+    {
+        if (is_array($value)) {
+            $items = $value;
+        } else {
+            $items = explode(',', (string) $value);
+        }
+        return array_values(array_filter(array_map(fn($v) => trim((string) $v), $items), fn($v) => $v !== ''));
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // GET /admin/products
-    // Query params: ?is_published=1 ?is_today_sale=1 ?is_flash_sale=1 ?search=polo ?user_id=5
+    // Query params supported:
+    //   ?is_published=1 ?is_today_sale=1 ?is_flash_sale=1 ?search=polo ?user_id=5
+    //   ?category_id=2                (or "2,5" for multiple)
+    //   ?color_id=4                   (or "4,7" for multiple)
+    //   ?size=S,L                     (matches any size in the list)
+    //   ?min_price=0 ?max_price=5000  (range on unit_price)
+    //   ?sort=price_asc|price_desc|name_asc|name_desc|newest|oldest
     // ═══════════════════════════════════════════════════════════════
     public function index(Request $request)
     {
@@ -97,6 +130,7 @@ class ProductController extends Controller
                 'colorVariants.sizeStocks',
             ]);
 
+            // ── Boolean flag filters ─────────────────────────────
             if ($request->filled('is_published')) {
                 $query->where('is_published', filter_var($request->is_published, FILTER_VALIDATE_BOOLEAN));
             }
@@ -106,11 +140,73 @@ class ProductController extends Controller
             if ($request->filled('is_flash_sale')) {
                 $query->where('is_flash_sale', filter_var($request->is_flash_sale, FILTER_VALIDATE_BOOLEAN));
             }
+
+            // ── Search ────────────────────────────────────────────
             if ($request->filled('search')) {
                 $query->where('name', 'like', '%' . $request->search . '%');
             }
 
-            $products = $query->latest()->paginate(15);
+            // ── Category filter ───────────────────────────────────
+            if ($request->filled('category_id')) {
+                $categoryIds = $this->toIdArray($request->query('category_id'));
+                if (!empty($categoryIds)) {
+                    $query->whereIn('category_id', $categoryIds);
+                }
+            }
+
+            // ── Color filter (product must have a color variant matching) ──
+            if ($request->filled('color_id')) {
+                $colorIds = $this->toIdArray($request->query('color_id'));
+                if (!empty($colorIds)) {
+                    $query->whereHas('colorVariants', function ($q) use ($colorIds) {
+                        $q->whereIn('color_id', $colorIds);
+                    });
+                }
+            }
+
+            // ── Size filter (product must have a size stock matching any of the sizes) ──
+            if ($request->filled('size')) {
+                $sizes = $this->toStringArray($request->query('size'));
+                if (!empty($sizes)) {
+                    $query->whereHas('colorVariants.sizeStocks', function ($q) use ($sizes) {
+                        $q->whereIn('size', $sizes);
+                    });
+                }
+            }
+
+            // ── Price range filter (against the product's unit_price) ──
+            if ($request->filled('min_price')) {
+                $query->where('unit_price', '>=', (float) $request->query('min_price'));
+            }
+            if ($request->filled('max_price')) {
+                $query->where('unit_price', '<=', (float) $request->query('max_price'));
+            }
+
+            // ── Sorting ────────────────────────────────────────────
+            switch ($request->query('sort')) {
+                case 'price_asc':
+                    $query->orderBy('unit_price', 'asc');
+                    break;
+                case 'price_desc':
+                    $query->orderBy('unit_price', 'desc');
+                    break;
+                case 'name_asc':
+                    $query->orderBy('name', 'asc');
+                    break;
+                case 'name_desc':
+                    $query->orderBy('name', 'desc');
+                    break;
+                case 'oldest':
+                    $query->oldest();
+                    break;
+                case 'newest':
+                default:
+                    // Also covers sort= (empty string) — falls back to newest first.
+                    $query->latest();
+                    break;
+            }
+
+            $products = $query->paginate(15);
 
             // Attach is_wishlisted flag (pass ?user_id=X to check against wishlist table)
             $userId = $request->query('user_id');
@@ -132,7 +228,6 @@ class ProductController extends Controller
             $product = $this->loadProduct($id);
             $userId = $request->query('user_id');
             $this->attachWishlistFlag($product, $userId);
-
             return response()->json(['status' => 'success', 'data' => $product], 200);
         } catch (ModelNotFoundException $e) {
             return response()->json(['status' => 'error', 'message' => 'Product not found.'], 404);
@@ -159,10 +254,8 @@ class ProductController extends Controller
             ->where('is_published', true)
             ->latest()
             ->paginate(15);
-
             $userId = $request->query('user_id');
             $this->attachWishlistFlagToCollection($products, $userId);
-
             return response()->json(['status' => 'success', 'data' => $products], 200);
         } catch (Exception $e) {
             Log::error('Product By Category Error: ' . $e->getMessage());
@@ -189,10 +282,8 @@ class ProductController extends Controller
             ->latest()
             ->limit(10)
             ->get();
-
             $userId = $request->query('user_id');
             $this->attachWishlistFlagToCollection($similar, $userId);
-
             return response()->json(['status' => 'success', 'data' => $similar], 200);
         } catch (ModelNotFoundException $e) {
             return response()->json(['status' => 'error', 'message' => 'Product not found.'], 404);
@@ -434,14 +525,12 @@ class ProductController extends Controller
                                     $sizeStock = ProductSizeStock::where('id', $sizeData['size_stock_id'])
                                         ->where('product_color_variant_id', $colorVariant->id)
                                         ->firstOrFail();
-
                                     $skuTaken = ProductSizeStock::where('sku', $sizeData['sku'])
                                         ->where('id', '!=', $sizeStock->id)
                                         ->exists();
                                     if ($skuTaken) {
                                         throw new Exception("SKU '{$sizeData['sku']}' already exists.");
                                     }
-
                                     $sizeStock->update([
                                         'size'  => $sizeData['size'],
                                         'sku'   => $sizeData['sku'],
