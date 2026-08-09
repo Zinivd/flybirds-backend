@@ -6,16 +6,16 @@ use Illuminate\Support\ServiceProvider;
 
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
-
+use App\Services\DelhiveryService;
 class AppServiceProvider extends ServiceProvider
 {
     /**
      * Register any application services.
      */
-    public function register(): void
-    {
-        //
-    }
+   public function register(): void
+{
+    $this->app->singleton(DelhiveryService::class, fn () => new DelhiveryService());
+}
 
     /**
      * Bootstrap any application services.

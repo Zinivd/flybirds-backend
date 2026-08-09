@@ -10,6 +10,7 @@ use App\Http\Controllers\Api\Admin\SupportTicketController;
 use App\Http\Controllers\Api\Admin\UserAddressController;
 use App\Http\Controllers\Api\Admin\VideoReelController;
 use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\OtpAuthController;
 use App\Http\Controllers\Api\ProductReviewController;
 use App\Http\Controllers\Api\RecentlyViewedController;
 use Illuminate\Support\Facades\Route;
@@ -124,9 +125,9 @@ Route::prefix('admin')->group(function () {
 
     // Reports
     Route::prefix('reports')->group(function () {
-        Route::get('sales',        [ReportController::class, 'salesReport']);
-        Route::get('inventory',    [ReportController::class, 'productInventoryReport']);
-        Route::get('orders',       [ReportController::class, 'orderReport']);
+        Route::get('sales', [ReportController::class, 'salesReport']);
+        Route::get('inventory', [ReportController::class, 'productInventoryReport']);
+        Route::get('orders', [ReportController::class, 'orderReport']);
         Route::get('transactions', [ReportController::class, 'transactionReport']);
     });
 
@@ -161,13 +162,7 @@ Route::prefix('payment')->group(function () {
     Route::post('/verify', [PaymentController::class, 'verifyPayment']);
 });
 
-Route::prefix('delhivery')->group(function () {
-    Route::get('/serviceability/{pincode}', [DelhiveryController::class, 'checkServiceability']);
-    Route::get('/label', [DelhiveryController::class, 'getLabel']);
-    Route::get('/track/{waybill}', [DelhiveryController::class, 'track']);
-    Route::post('/shipment/create', [DelhiveryController::class, 'createShipment']);
-    Route::get('/calculate-cost', [DelhiveryController::class, 'calculateCost']);
-});
+
 
 Route::get('/test-s3', function () {
     try {
@@ -241,11 +236,45 @@ Route::get('/reviews', [ProductReviewController::class, 'index']);
 Route::get('/reviews/{id}', [ProductReviewController::class, 'show']);
 Route::patch('/reviews/{id}', [ProductReviewController::class, 'update']);
 Route::delete('/reviews/{id}', [ProductReviewController::class, 'destroy']);
- 
+
 Route::get('/users/{userId}/reviews', [ProductReviewController::class, 'byCustomer']);
 Route::get('/products/{productId}/reviews', [ProductReviewController::class, 'byProduct']);
- 
+
 
 Route::get('/orders/{id}/invoice', [OrderController::class, 'invoice']);
 
 Route::post('/orders/{id}/invoice-mail', [OrderController::class, 'invoiceMail']);
+Route::get('/orders/{id}/shipping-quote', [OrderController::class, 'shippingQuote']);
+
+
+
+
+
+
+
+Route::post('/orders/{id}/cod-confirm', [OrderController::class, 'confirmCod']);
+
+// User-facing — routes/api.php
+Route::prefix('user/delhivery')->group(function () {
+    Route::get('/serviceability/{pincode}', [DelhiveryController::class, 'checkServiceability']);
+    Route::get('/track/{orderId}/{userId}', [DelhiveryController::class, 'trackMyOrder']);
+    Route::get('/tat', [DelhiveryController::class, 'getTAT']);
+    Route::get('/shipping-cost', [DelhiveryController::class, 'calculateShippingCost']);
+});
+
+// Admin-facing — routes/api.php
+Route::prefix('admin/delhivery')->group(function () {
+    Route::get('/waybill', [DelhiveryController::class, 'fetchWaybill']);
+    Route::post('/shipment/create', [DelhiveryController::class, 'createShipment']);
+    Route::post('/shipment/cancel', [DelhiveryController::class, 'cancelShipment']);
+    Route::get('/shipment/track/{waybill}', [DelhiveryController::class, 'trackShipment']);
+    Route::get('/shipment/label/{waybill}', [DelhiveryController::class, 'getLabel']);
+    Route::post('/pickup/create', [DelhiveryController::class, 'createPickup']);
+    Route::post('/ndr/update', [DelhiveryController::class, 'updateNDR']);
+    Route::post('/ewaybill/update', [DelhiveryController::class, 'updateEwaybill']);
+      Route::get('/ndr/list', [DelhiveryController::class, 'listNdr']);
+    Route::post('/ndr/sync', [DelhiveryController::class, 'syncNdrStatus']);
+});
+
+Route::post('/auth/otp/send', [OtpAuthController::class, 'sendOtp']);
+Route::post('/auth/otp/verify', [OtpAuthController::class, 'verifyOtp']);

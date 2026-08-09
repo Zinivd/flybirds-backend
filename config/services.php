@@ -35,8 +35,26 @@ return [
         ],
     ],
     'razorpay' => [
-    'key' => env('RAZORPAY_KEY_ID'),
-    'secret' => env('RAZORPAY_KEY_SECRET'),
+        'key' => env('RAZORPAY_KEY_ID'),
+        'secret' => env('RAZORPAY_KEY_SECRET'),
+    ],
+
+'delhivery' => [
+    'base_url' => env('DELHIVERY_BASE_URL'),
+    'token' => env('DELHIVERY_TOKEN'),
+    'pickup_location' => env('DELHIVERY_PICKUP_LOCATION'),
+    'client_name' => env('DELHIVERY_CLIENT_NAME'),
+    'seller_name' => env('DELHIVERY_CLIENT_NAME'),
+    'seller_address' => env('DELHIVERY_SELLER_ADDRESS'),
+    'seller_gst_tin' => env('DELHIVERY_SELLER_GST_TIN'),
+],
+
+
+'whatsapp' => [
+    'api_url' => env('WHATSAPP_API_URL'),
+    'bearer_token' => env('WHATSAPP_BEARER_TOKEN'),
+    'api_key' => env('WHATSAPP_API_KEY'),
+    'phone_no_id' => env('WHATSAPP_PHONE_NO_ID'),
 ],
 
 ];
