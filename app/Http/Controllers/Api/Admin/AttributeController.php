@@ -9,6 +9,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Log;
 use Exception;
+use Illuminate\Support\Facades\DB;
 
 class AttributeController extends Controller
 {
@@ -100,4 +101,128 @@ class AttributeController extends Controller
             return response()->json(['status' => 'error', 'message' => 'File not found.'], 404);
         }
     }
+
+
+
+    // --- FAMILY COLOR METHODS ---
+public function storeFamilyColor(Request $request)
+{
+    $request->validate([
+        'name'                => 'required|string|max:255',
+        'code'                => 'required|string|max:20',
+        'children'            => 'nullable|array',
+        'children.*.name'     => 'required_with:children|string|max:255',
+        'children.*.code'     => 'required_with:children|string|max:20',
+    ]);
+    DB::beginTransaction();
+    try {
+        $familyColor = \App\Models\FamilyColor::create([
+            'name' => $request->name,
+            'code' => $request->code,
+        ]);
+        foreach ($request->children ?? [] as $child) {
+            \App\Models\FamilyColorChild::create([
+                'family_color_id' => $familyColor->id,
+                'name'            => $child['name'],
+                'code'            => $child['code'],
+            ]);
+        }
+        DB::commit();
+        return response()->json([
+            'status'  => 'success',
+            'message' => 'Family color created successfully.',
+            'data'    => $familyColor->load('children'),
+        ], 201);
+    } catch (Exception $e) {
+        DB::rollBack();
+        Log::error('Family Color Store Error: ' . $e->getMessage());
+        return response()->json(['status' => 'error', 'message' => 'Failed to create family color.'], 500);
+    }
+}
+
+public function indexFamilyColors()
+{
+    return response()->json([
+        'status' => 'success',
+        'data'   => \App\Models\FamilyColor::with('children')->latest()->get(),
+    ], 200);
+}
+
+public function showFamilyColor($id)
+{
+    try {
+        $familyColor = \App\Models\FamilyColor::with('children')->findOrFail($id);
+        return response()->json(['status' => 'success', 'data' => $familyColor], 200);
+    } catch (Exception $e) {
+        return response()->json(['status' => 'error', 'message' => 'Family color not found.'], 404);
+    }
+}
+
+public function updateFamilyColor(Request $request, $id)
+{
+    try {
+        $familyColor = \App\Models\FamilyColor::findOrFail($id);
+    } catch (Exception $e) {
+        return response()->json(['status' => 'error', 'message' => 'Family color not found.'], 404);
+    }
+    $request->validate([
+        'name'                => 'sometimes|string|max:255',
+        'code'                => 'sometimes|string|max:20',
+        'children'            => 'nullable|array',
+        'children.*.id'       => 'nullable|exists:family_color_children,id',
+        'children.*.name'     => 'required_with:children|string|max:255',
+        'children.*.code'     => 'required_with:children|string|max:20',
+    ]);
+    DB::beginTransaction();
+    try {
+        $familyColor->update($request->only(['name', 'code']));
+        foreach ($request->children ?? [] as $child) {
+            if (!empty($child['id'])) {
+                \App\Models\FamilyColorChild::where('id', $child['id'])
+                    ->where('family_color_id', $familyColor->id)
+                    ->update(['name' => $child['name'], 'code' => $child['code']]);
+            } else {
+                \App\Models\FamilyColorChild::create([
+                    'family_color_id' => $familyColor->id,
+                    'name'            => $child['name'],
+                    'code'            => $child['code'],
+                ]);
+            }
+        }
+        DB::commit();
+        return response()->json([
+            'status'  => 'success',
+            'message' => 'Family color updated successfully.',
+            'data'    => $familyColor->load('children'),
+        ], 200);
+    } catch (Exception $e) {
+        DB::rollBack();
+        Log::error('Family Color Update Error: ' . $e->getMessage());
+        return response()->json(['status' => 'error', 'message' => 'Failed to update family color.'], 500);
+    }
+}
+
+public function deleteFamilyColor($id)
+{
+    try {
+        $familyColor = \App\Models\FamilyColor::findOrFail($id);
+        $familyColor->delete(); // children cascade via FK
+        return response()->json(['status' => 'success', 'message' => 'Family color deleted successfully.'], 200);
+    } catch (Exception $e) {
+        return response()->json(['status' => 'error', 'message' => 'Family color not found.'], 404);
+    }
+}
+
+public function deleteFamilyColorChild($familyId, $childId)
+{
+    try {
+        $child = \App\Models\FamilyColorChild::where('id', $childId)
+            ->where('family_color_id', $familyId)
+            ->firstOrFail();
+        $child->delete();
+        return response()->json(['status' => 'success', 'message' => 'Child color deleted successfully.'], 200);
+    } catch (Exception $e) {
+        return response()->json(['status' => 'error', 'message' => 'Child color not found.'], 404);
+    }
+}
 }

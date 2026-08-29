@@ -1,13 +1,12 @@
 <?php
-
 namespace App\Http\Controllers\Api\Admin;
-
 use App\Http\Controllers\Controller;
 use App\Models\Product;
 use App\Models\ProductColorVariant;
 use App\Models\ProductColorImage;
 use App\Models\ProductSizeStock;
 use App\Models\Media;
+use App\Models\FamilyColorChild;
 use App\Models\CartWishlistData;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -15,7 +14,6 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Validation\ValidationException;
 use Exception;
-
 class ProductController extends Controller
 {
     // ═══════════════════════════════════════════════════════════════
@@ -25,13 +23,13 @@ class ProductController extends Controller
     {
         return Product::with([
             'category',
-            'colorVariants.color',
-            'colorVariants.galleryImages',   // ProductColorImage where type = gallery
-            'colorVariants.thumbnailImage',  // ProductColorImage where type = thumbnail
+            'colorVariants.familyColor',
+            'colorVariants.familyColorChild',
+            'colorVariants.galleryImages',
+            'colorVariants.thumbnailImage',
             'colorVariants.sizeStocks',
         ])->findOrFail($id);
     }
-
     // ═══════════════════════════════════════════════════════════════
     // PRIVATE HELPER: Attach is_wishlisted flag to a single product
     // ═══════════════════════════════════════════════════════════════
@@ -47,16 +45,13 @@ class ProductController extends Controller
         $product->setAttribute('is_wishlisted', $isWishlisted);
         return $product;
     }
-
     // ═══════════════════════════════════════════════════════════════
     // PRIVATE HELPER: Attach is_wishlisted flag to a collection efficiently
-    // (avoids N+1 queries by fetching all wishlisted product_ids in one go)
     // ═══════════════════════════════════════════════════════════════
     private function attachWishlistFlagToCollection($products, $userId = null)
     {
         $wishlistedIds = [];
         if ($userId) {
-            $productIds = collect($products->items ?? $products)->pluck('id')->toArray();
             if (method_exists($products, 'items')) {
                 $productIds = collect($products->items())->pluck('id')->toArray();
             } else {
@@ -75,48 +70,49 @@ class ProductController extends Controller
         });
         return $products;
     }
-
     // ═══════════════════════════════════════════════════════════════
-    // PRIVATE HELPER: Turn a query param into a clean array of integer IDs.
-    // Accepts either a single value ("2") or a comma-separated list ("2,5,9")
-    // or an actual array (?category_id[]=2&category_id[]=5).
+    // PRIVATE HELPER: query param -> clean int array
     // ═══════════════════════════════════════════════════════════════
     private function toIdArray($value): array
     {
-        if (is_array($value)) {
-            $items = $value;
-        } else {
-            $items = explode(',', (string) $value);
-        }
+        $items = is_array($value) ? $value : explode(',', (string) $value);
         return array_values(array_filter(array_map(function ($v) {
             $v = trim((string) $v);
             return $v !== '' && is_numeric($v) ? (int) $v : null;
         }, $items), fn($v) => $v !== null));
     }
-
     // ═══════════════════════════════════════════════════════════════
-    // PRIVATE HELPER: Turn a query param into a clean array of trimmed strings.
-    // Accepts either a single value ("S") or a comma-separated list ("S,L,XL")
-    // or an actual array.
+    // PRIVATE HELPER: query param -> clean string array
     // ═══════════════════════════════════════════════════════════════
     private function toStringArray($value): array
     {
-        if (is_array($value)) {
-            $items = $value;
-        } else {
-            $items = explode(',', (string) $value);
-        }
+        $items = is_array($value) ? $value : explode(',', (string) $value);
         return array_values(array_filter(array_map(fn($v) => trim((string) $v), $items), fn($v) => $v !== ''));
     }
-
+    // ═══════════════════════════════════════════════════════════════
+    // PRIVATE HELPER: validate a family_color_child_id actually belongs
+    // to the given family_color_id. Throws if mismatched.
+    // ═══════════════════════════════════════════════════════════════
+    private function assertChildBelongsToFamily(?int $familyColorId, ?int $childId): void
+    {
+        if (!$childId) {
+            return;
+        }
+        $child = FamilyColorChild::find($childId);
+        if (!$child || (int) $child->family_color_id !== (int) $familyColorId) {
+            throw new Exception("The selected color child does not belong to the selected family color.");
+        }
+    }
     // ═══════════════════════════════════════════════════════════════
     // GET /admin/products
     // Query params supported:
     //   ?is_published=1 ?is_today_sale=1 ?is_flash_sale=1 ?search=polo ?user_id=5
     //   ?category_id=2                (or "2,5" for multiple)
-    //   ?color_id=4                   (or "4,7" for multiple)
-    //   ?size=S,L                     (matches any size in the list)
-    //   ?min_price=0 ?max_price=5000  (range on unit_price)
+    //   ?family_color_id=4            (or "4,7" for multiple)
+    //   ?family_color_child_id=9      (or "9,10" for multiple)
+    //   ?size=S,L
+    //   ?min_price=0 ?max_price=5000
+    //   ?status=active|inactive|all   (default: active)
     //   ?sort=price_asc|price_desc|name_asc|name_desc|newest|oldest
     // ═══════════════════════════════════════════════════════════════
     public function index(Request $request)
@@ -124,12 +120,20 @@ class ProductController extends Controller
         try {
             $query = Product::with([
                 'category',
-                'colorVariants.color',
+                'colorVariants.familyColor',
+                'colorVariants.familyColorChild',
                 'colorVariants.galleryImages',
                 'colorVariants.thumbnailImage',
                 'colorVariants.sizeStocks',
             ]);
-
+            // ── Active / inactive status ─────────────────────────
+            $status = $request->query('status', 'active');
+            if ($status === 'active') {
+                $query->where('is_active', true);
+            } elseif ($status === 'inactive') {
+                $query->where('is_active', false);
+            }
+            // 'all' → no filter applied
             // ── Boolean flag filters ─────────────────────────────
             if ($request->filled('is_published')) {
                 $query->where('is_published', filter_var($request->is_published, FILTER_VALIDATE_BOOLEAN));
@@ -140,12 +144,10 @@ class ProductController extends Controller
             if ($request->filled('is_flash_sale')) {
                 $query->where('is_flash_sale', filter_var($request->is_flash_sale, FILTER_VALIDATE_BOOLEAN));
             }
-
             // ── Search ────────────────────────────────────────────
             if ($request->filled('search')) {
                 $query->where('name', 'like', '%' . $request->search . '%');
             }
-
             // ── Category filter ───────────────────────────────────
             if ($request->filled('category_id')) {
                 $categoryIds = $this->toIdArray($request->query('category_id'));
@@ -153,18 +155,25 @@ class ProductController extends Controller
                     $query->whereIn('category_id', $categoryIds);
                 }
             }
-
-            // ── Color filter (product must have a color variant matching) ──
-            if ($request->filled('color_id')) {
-                $colorIds = $this->toIdArray($request->query('color_id'));
-                if (!empty($colorIds)) {
-                    $query->whereHas('colorVariants', function ($q) use ($colorIds) {
-                        $q->whereIn('color_id', $colorIds);
+            // ── Family color filter ───────────────────────────────
+            if ($request->filled('family_color_id')) {
+                $familyColorIds = $this->toIdArray($request->query('family_color_id'));
+                if (!empty($familyColorIds)) {
+                    $query->whereHas('colorVariants', function ($q) use ($familyColorIds) {
+                        $q->whereIn('family_color_id', $familyColorIds);
                     });
                 }
             }
-
-            // ── Size filter (product must have a size stock matching any of the sizes) ──
+            // ── Family color child filter ─────────────────────────
+            if ($request->filled('family_color_child_id')) {
+                $childIds = $this->toIdArray($request->query('family_color_child_id'));
+                if (!empty($childIds)) {
+                    $query->whereHas('colorVariants', function ($q) use ($childIds) {
+                        $q->whereIn('family_color_child_id', $childIds);
+                    });
+                }
+            }
+            // ── Size filter ────────────────────────────────────────
             if ($request->filled('size')) {
                 $sizes = $this->toStringArray($request->query('size'));
                 if (!empty($sizes)) {
@@ -173,15 +182,13 @@ class ProductController extends Controller
                     });
                 }
             }
-
-            // ── Price range filter (against the product's unit_price) ──
+            // ── Price range filter ─────────────────────────────────
             if ($request->filled('min_price')) {
                 $query->where('unit_price', '>=', (float) $request->query('min_price'));
             }
             if ($request->filled('max_price')) {
                 $query->where('unit_price', '<=', (float) $request->query('max_price'));
             }
-
             // ── Sorting ────────────────────────────────────────────
             switch ($request->query('sort')) {
                 case 'price_asc':
@@ -201,24 +208,18 @@ class ProductController extends Controller
                     break;
                 case 'newest':
                 default:
-                    // Also covers sort= (empty string) — falls back to newest first.
                     $query->latest();
                     break;
             }
-
             $products = $query->paginate(15);
-
-            // Attach is_wishlisted flag (pass ?user_id=X to check against wishlist table)
             $userId = $request->query('user_id');
             $this->attachWishlistFlagToCollection($products, $userId);
-
             return response()->json(['status' => 'success', 'data' => $products], 200);
         } catch (Exception $e) {
             Log::error('Product Index Error: ' . $e->getMessage());
             return response()->json(['status' => 'error', 'message' => 'Failed to retrieve products.'], 500);
         }
     }
-
     // ═══════════════════════════════════════════════════════════════
     // GET /admin/products/{id}?user_id=5
     // ═══════════════════════════════════════════════════════════════
@@ -236,7 +237,6 @@ class ProductController extends Controller
             return response()->json(['status' => 'error', 'message' => 'Failed to retrieve product.'], 500);
         }
     }
-
     // ═══════════════════════════════════════════════════════════════
     // GET /admin/products/category/{categoryId}?user_id=5
     // ═══════════════════════════════════════════════════════════════
@@ -245,13 +245,15 @@ class ProductController extends Controller
         try {
             $products = Product::with([
                 'category',
-                'colorVariants.color',
+                'colorVariants.familyColor',
+                'colorVariants.familyColorChild',
                 'colorVariants.galleryImages',
                 'colorVariants.thumbnailImage',
                 'colorVariants.sizeStocks',
             ])
             ->where('category_id', $categoryId)
             ->where('is_published', true)
+            ->where('is_active', true)
             ->latest()
             ->paginate(15);
             $userId = $request->query('user_id');
@@ -262,7 +264,6 @@ class ProductController extends Controller
             return response()->json(['status' => 'error', 'message' => 'Failed to retrieve products.'], 500);
         }
     }
-
     // ═══════════════════════════════════════════════════════════════
     // GET /admin/products/{id}/similar?user_id=5
     // ═══════════════════════════════════════════════════════════════
@@ -271,7 +272,8 @@ class ProductController extends Controller
         try {
             $product = Product::findOrFail($id);
             $similar = Product::with([
-                'colorVariants.color',
+                'colorVariants.familyColor',
+                'colorVariants.familyColorChild',
                 'colorVariants.thumbnailImage',
                 'colorVariants.galleryImages',
                 'colorVariants.sizeStocks',
@@ -279,6 +281,7 @@ class ProductController extends Controller
             ->where('category_id', $product->category_id)
             ->where('id', '!=', $id)
             ->where('is_published', true)
+            ->where('is_active', true)
             ->latest()
             ->limit(10)
             ->get();
@@ -292,7 +295,6 @@ class ProductController extends Controller
             return response()->json(['status' => 'error', 'message' => 'Failed to retrieve similar products.'], 500);
         }
     }
-
     // ═══════════════════════════════════════════════════════════════
     // POST /admin/products  — Create product
     // ═══════════════════════════════════════════════════════════════
@@ -321,16 +323,27 @@ class ProductController extends Controller
                 'flash_sale_discount_type' => 'nullable|in:flat,percent',
                 'is_today_sale'            => 'boolean',
                 'is_published'             => 'boolean',
-                'colors'                   => 'required|array|min:1',
-                'colors.*.color_id'        => 'required|exists:colors,id',
-                'colors.*.gallery_image_ids' => 'nullable|array|max:5',
-                'colors.*.gallery_image_ids.*' => 'integer|exists:media,id',
-                'colors.*.thumbnail_image_id'  => 'nullable|integer|exists:media,id',
-                'colors.*.sizes'               => 'required|array|min:1',
-                'colors.*.sizes.*.size'        => 'required|string|max:50',
-                'colors.*.sizes.*.sku'         => 'required|string|unique:product_size_stocks,sku',
-                'colors.*.sizes.*.price'       => 'required|numeric|min:0',
-                'colors.*.sizes.*.stock'       => 'required|integer|min:0',
+                'is_active'                => 'boolean',
+                // Spotlight image — passed as a media id, same pattern as thumbnail_image_id
+                'spotlight_image_id'       => 'nullable|integer|exists:media,id',
+                // SEO
+                'seo_title'                => 'nullable|string|max:255',
+                'seo_description'          => 'nullable|string',
+                'seo_keywords'             => 'nullable|array',
+                'seo_keywords.*'           => 'string|max:100',
+                // Colors — now driven by family color / family color child
+                'colors'                        => 'required|array|min:1',
+                'colors.*.family_color_id'      => 'required|exists:family_colors,id',
+                'colors.*.family_color_child_id'=> 'nullable|exists:family_color_children,id',
+                'colors.*.gallery_image_ids'    => 'nullable|array|max:6',
+'colors.*.gallery_image_ids.*'  => 'integer|exists:media,id',
+                'colors.*.thumbnail_image_id'   => 'nullable|integer|exists:media,id',
+                'colors.*.sizes'                => 'required|array|min:1',
+                'colors.*.sizes.*.size'         => 'required|string|max:50',
+                // SKU is fully user-defined — required, unique, no auto-generation anywhere
+                'colors.*.sizes.*.sku'          => 'required|string|max:100|distinct|unique:product_size_stocks,sku',
+                'colors.*.sizes.*.price'        => 'required|numeric|min:0',
+                'colors.*.sizes.*.stock'        => 'required|integer|min:0',
             ]);
         } catch (ValidationException $e) {
             return response()->json([
@@ -339,9 +352,14 @@ class ProductController extends Controller
                 'errors'  => $e->errors(),
             ], 422);
         }
-
         DB::beginTransaction();
         try {
+            // Resolve spotlight image URL from media id, if provided
+            $spotlightImageUrl = null;
+            if (!empty($validated['spotlight_image_id'])) {
+                $spotlightMedia = Media::find($validated['spotlight_image_id']);
+                $spotlightImageUrl = $spotlightMedia->file_url ?? null;
+            }
             $product = Product::create([
                 'name'                     => $validated['name'],
                 'brand'                    => $validated['brand'] ?? null,
@@ -364,14 +382,22 @@ class ProductController extends Controller
                 'flash_sale_discount_type' => $validated['flash_sale_discount_type'] ?? null,
                 'is_today_sale'            => $validated['is_today_sale'] ?? false,
                 'is_published'             => $validated['is_published'] ?? true,
+                'is_active'                => $validated['is_active'] ?? true,
+                'spotlight_image'          => $spotlightImageUrl,
+                'seo_title'                => $validated['seo_title'] ?? null,
+                'seo_description'          => $validated['seo_description'] ?? null,
+                'seo_keywords'             => $validated['seo_keywords'] ?? [],
             ]);
-
             foreach ($validated['colors'] as $colorData) {
+                $this->assertChildBelongsToFamily(
+                    $colorData['family_color_id'],
+                    $colorData['family_color_child_id'] ?? null
+                );
                 $colorVariant = ProductColorVariant::create([
-                    'product_id' => $product->id,
-                    'color_id'   => $colorData['color_id'],
+                    'product_id'             => $product->id,
+                    'family_color_id'        => $colorData['family_color_id'],
+                    'family_color_child_id'  => $colorData['family_color_child_id'] ?? null,
                 ]);
-
                 if (!empty($colorData['gallery_image_ids'])) {
                     foreach ($colorData['gallery_image_ids'] as $sortOrder => $mediaId) {
                         $media = Media::find($mediaId);
@@ -385,7 +411,6 @@ class ProductController extends Controller
                         }
                     }
                 }
-
                 if (!empty($colorData['thumbnail_image_id'])) {
                     $media = Media::find($colorData['thumbnail_image_id']);
                     if ($media) {
@@ -397,7 +422,6 @@ class ProductController extends Controller
                         ]);
                     }
                 }
-
                 foreach ($colorData['sizes'] as $sizeData) {
                     ProductSizeStock::create([
                         'product_color_variant_id' => $colorVariant->id,
@@ -408,7 +432,6 @@ class ProductController extends Controller
                     ]);
                 }
             }
-
             DB::commit();
             return response()->json([
                 'status'  => 'success',
@@ -418,10 +441,9 @@ class ProductController extends Controller
         } catch (Exception $e) {
             DB::rollBack();
             Log::error('Product Store Error: ' . $e->getMessage());
-            return response()->json(['status' => 'error', 'message' => 'Failed to create product.'], 500);
+            return response()->json(['status' => 'error', 'message' => $e->getMessage() ?: 'Failed to create product.'], 500);
         }
     }
-
     // ═══════════════════════════════════════════════════════════════
     // POST /admin/products/{id}  — Update product
     // ═══════════════════════════════════════════════════════════════
@@ -432,7 +454,6 @@ class ProductController extends Controller
         } catch (ModelNotFoundException $e) {
             return response()->json(['status' => 'error', 'message' => 'Product not found.'], 404);
         }
-
         try {
             $validated = $request->validate([
                 'name'                     => 'sometimes|string|max:255',
@@ -443,7 +464,7 @@ class ProductController extends Controller
                 'tags'                     => 'nullable|string',
                 'estimate_shipping_days'   => 'nullable|integer|min:0',
                 'description'              => 'nullable|string',
-                'category_id'             => 'sometimes|exists:categories,id',
+                'category_id'              => 'sometimes|exists:categories,id',
                 'unit_price'               => 'sometimes|numeric|min:0',
                 'discount'                 => 'nullable|numeric|min:0',
                 'discount_type'            => 'nullable|in:flat,percent',
@@ -456,18 +477,25 @@ class ProductController extends Controller
                 'flash_sale_discount_type' => 'nullable|in:flat,percent',
                 'is_today_sale'            => 'sometimes|boolean',
                 'is_published'             => 'sometimes|boolean',
-                'colors'                       => 'sometimes|array|min:1',
-                'colors.*.color_variant_id'    => 'nullable|exists:product_color_variants,id',
-                'colors.*.color_id'            => 'required_with:colors|exists:colors,id',
-                'colors.*.gallery_image_ids' => 'nullable|array|max:5',
-                'colors.*.gallery_image_ids.*' => 'integer|exists:media,id',
-                'colors.*.thumbnail_image_id'  => 'nullable|integer|exists:media,id',
-                'colors.*.sizes'               => 'sometimes|array|min:1',
-                'colors.*.sizes.*.size_stock_id' => 'nullable|exists:product_size_stocks,id',
-                'colors.*.sizes.*.size'        => 'required_with:colors.*.sizes|string|max:50',
-                'colors.*.sizes.*.sku'         => 'required_with:colors.*.sizes|string',
-                'colors.*.sizes.*.price'       => 'required_with:colors.*.sizes|numeric|min:0',
-                'colors.*.sizes.*.stock'       => 'required_with:colors.*.sizes|integer|min:0',
+                'is_active'                => 'sometimes|boolean',
+                'spotlight_image_id'       => 'nullable|integer|exists:media,id',
+                'seo_title'                => 'nullable|string|max:255',
+                'seo_description'          => 'nullable|string',
+                'seo_keywords'             => 'nullable|array',
+                'seo_keywords.*'           => 'string|max:100',
+                'colors'                            => 'sometimes|array|min:1',
+                'colors.*.color_variant_id'         => 'nullable|exists:product_color_variants,id',
+                'colors.*.family_color_id'          => 'required_with:colors|exists:family_colors,id',
+                'colors.*.family_color_child_id'    => 'nullable|exists:family_color_children,id',
+                'colors.*.gallery_image_ids'        => 'nullable|array|max:6',
+'colors.*.gallery_image_ids.*'      => 'integer|exists:media,id',
+                'colors.*.thumbnail_image_id'       => 'nullable|integer|exists:media,id',
+                'colors.*.sizes'                    => 'sometimes|array|min:1',
+                'colors.*.sizes.*.size_stock_id'    => 'nullable|exists:product_size_stocks,id',
+                'colors.*.sizes.*.size'             => 'required_with:colors.*.sizes|string|max:50',
+                'colors.*.sizes.*.sku'              => 'required_with:colors.*.sizes|string|max:100',
+                'colors.*.sizes.*.price'            => 'required_with:colors.*.sizes|numeric|min:0',
+                'colors.*.sizes.*.stock'            => 'required_with:colors.*.sizes|integer|min:0',
             ]);
         } catch (ValidationException $e) {
             return response()->json([
@@ -476,19 +504,36 @@ class ProductController extends Controller
                 'errors'  => $e->errors(),
             ], 422);
         }
-
         DB::beginTransaction();
         try {
-            $product->update(array_filter($validated, fn($k) => !in_array($k, ['colors']), ARRAY_FILTER_USE_KEY));
-
+            $productUpdateData = array_filter(
+                $validated,
+                fn($k) => !in_array($k, ['colors', 'spotlight_image_id']),
+                ARRAY_FILTER_USE_KEY
+            );
+            if (array_key_exists('spotlight_image_id', $validated)) {
+                if (!empty($validated['spotlight_image_id'])) {
+                    $media = Media::find($validated['spotlight_image_id']);
+                    $productUpdateData['spotlight_image'] = $media->file_url ?? null;
+                } else {
+                    $productUpdateData['spotlight_image'] = null;
+                }
+            }
+            $product->update($productUpdateData);
             if (!empty($validated['colors'])) {
                 foreach ($validated['colors'] as $colorData) {
+                    $this->assertChildBelongsToFamily(
+                        $colorData['family_color_id'],
+                        $colorData['family_color_child_id'] ?? null
+                    );
                     if (!empty($colorData['color_variant_id'])) {
                         $colorVariant = ProductColorVariant::where('id', $colorData['color_variant_id'])
                             ->where('product_id', $product->id)
                             ->firstOrFail();
-                        $colorVariant->update(['color_id' => $colorData['color_id']]);
-
+                        $colorVariant->update([
+                            'family_color_id'       => $colorData['family_color_id'],
+                            'family_color_child_id' => $colorData['family_color_child_id'] ?? null,
+                        ]);
                         if (array_key_exists('gallery_image_ids', $colorData)) {
                             $colorVariant->galleryImages()->delete();
                             foreach (($colorData['gallery_image_ids'] ?? []) as $sortOrder => $mediaId) {
@@ -503,7 +548,6 @@ class ProductController extends Controller
                                 }
                             }
                         }
-
                         if (array_key_exists('thumbnail_image_id', $colorData)) {
                             $colorVariant->thumbnailImage()->delete();
                             if (!empty($colorData['thumbnail_image_id'])) {
@@ -518,7 +562,6 @@ class ProductController extends Controller
                                 }
                             }
                         }
-
                         if (!empty($colorData['sizes'])) {
                             foreach ($colorData['sizes'] as $sizeData) {
                                 if (!empty($sizeData['size_stock_id'])) {
@@ -554,10 +597,10 @@ class ProductController extends Controller
                         }
                     } else {
                         $colorVariant = ProductColorVariant::create([
-                            'product_id' => $product->id,
-                            'color_id'   => $colorData['color_id'],
+                            'product_id'             => $product->id,
+                            'family_color_id'        => $colorData['family_color_id'],
+                            'family_color_child_id'  => $colorData['family_color_child_id'] ?? null,
                         ]);
-
                         foreach (($colorData['gallery_image_ids'] ?? []) as $sortOrder => $mediaId) {
                             $media = Media::find($mediaId);
                             if ($media) {
@@ -569,7 +612,6 @@ class ProductController extends Controller
                                 ]);
                             }
                         }
-
                         if (!empty($colorData['thumbnail_image_id'])) {
                             $media = Media::find($colorData['thumbnail_image_id']);
                             if ($media) {
@@ -581,7 +623,6 @@ class ProductController extends Controller
                                 ]);
                             }
                         }
-
                         foreach (($colorData['sizes'] ?? []) as $sizeData) {
                             $skuTaken = ProductSizeStock::where('sku', $sizeData['sku'])->exists();
                             if ($skuTaken) {
@@ -598,7 +639,6 @@ class ProductController extends Controller
                     }
                 }
             }
-
             DB::commit();
             return response()->json([
                 'status'  => 'success',
@@ -611,7 +651,6 @@ class ProductController extends Controller
             return response()->json(['status' => 'error', 'message' => $e->getMessage() ?: 'Failed to update product.'], 500);
         }
     }
-
     // ═══════════════════════════════════════════════════════════════
     // PATCH /admin/products/{id}/publish
     // ═══════════════════════════════════════════════════════════════
@@ -633,7 +672,6 @@ class ProductController extends Controller
             return response()->json(['status' => 'error', 'message' => 'Failed to update publish status.'], 500);
         }
     }
-
     // ═══════════════════════════════════════════════════════════════
     // PATCH /admin/products/{id}/today-sale
     // ═══════════════════════════════════════════════════════════════
@@ -655,7 +693,6 @@ class ProductController extends Controller
             return response()->json(['status' => 'error', 'message' => 'Failed to update today sale.'], 500);
         }
     }
-
     // ═══════════════════════════════════════════════════════════════
     // PATCH /admin/products/{id}/flash-sale
     // ═══════════════════════════════════════════════════════════════
@@ -666,7 +703,6 @@ class ProductController extends Controller
         } catch (ModelNotFoundException $e) {
             return response()->json(['status' => 'error', 'message' => 'Product not found.'], 404);
         }
-
         try {
             $validated = $request->validate([
                 'is_flash_sale'            => 'required|boolean',
@@ -677,7 +713,6 @@ class ProductController extends Controller
         } catch (ValidationException $e) {
             return response()->json(['status' => 'error', 'message' => 'Validation failed.', 'errors' => $e->errors()], 422);
         }
-
         try {
             if ($validated['is_flash_sale']) {
                 if (empty($validated['flash_sale_discount']) || empty($validated['flash_sale_discount_type'])) {
@@ -700,7 +735,6 @@ class ProductController extends Controller
                     'flash_sale_discount_type' => null,
                 ]);
             }
-
             return response()->json([
                 'status'  => 'success',
                 'message' => $product->is_flash_sale ? 'Flash sale activated.' : 'Flash sale deactivated.',
@@ -718,24 +752,42 @@ class ProductController extends Controller
             return response()->json(['status' => 'error', 'message' => 'Failed to update flash sale.'], 500);
         }
     }
-
     // ═══════════════════════════════════════════════════════════════
     // DELETE /admin/products/{id}
+    // Soft delete only — flips is_active to false, no data is removed.
     // ═══════════════════════════════════════════════════════════════
     public function destroy($id)
     {
         try {
             $product = Product::findOrFail($id);
-            $product->delete();
-            return response()->json(['status' => 'success', 'message' => 'Product deleted successfully.'], 200);
+            $product->is_active = false;
+            $product->save();
+            return response()->json(['status' => 'success', 'message' => 'Product deactivated successfully.'], 200);
         } catch (ModelNotFoundException $e) {
             return response()->json(['status' => 'error', 'message' => 'Product not found.'], 404);
         } catch (Exception $e) {
             Log::error('Product Delete Error: ' . $e->getMessage());
-            return response()->json(['status' => 'error', 'message' => 'Failed to delete product.'], 500);
+            return response()->json(['status' => 'error', 'message' => 'Failed to deactivate product.'], 500);
         }
     }
-
+    // ═══════════════════════════════════════════════════════════════
+    // PATCH /admin/products/{id}/activate
+    // Reverses a soft delete.
+    // ═══════════════════════════════════════════════════════════════
+    public function activate($id)
+    {
+        try {
+            $product = Product::findOrFail($id);
+            $product->is_active = true;
+            $product->save();
+            return response()->json(['status' => 'success', 'message' => 'Product activated successfully.'], 200);
+        } catch (ModelNotFoundException $e) {
+            return response()->json(['status' => 'error', 'message' => 'Product not found.'], 404);
+        } catch (Exception $e) {
+            Log::error('Product Activate Error: ' . $e->getMessage());
+            return response()->json(['status' => 'error', 'message' => 'Failed to activate product.'], 500);
+        }
+    }
     // ═══════════════════════════════════════════════════════════════
     // DELETE /admin/products/{productId}/colors/{colorVariantId}
     // ═══════════════════════════════════════════════════════════════
@@ -754,7 +806,6 @@ class ProductController extends Controller
             return response()->json(['status' => 'error', 'message' => 'Failed to delete color variant.'], 500);
         }
     }
-
     // ═══════════════════════════════════════════════════════════════
     // DELETE /admin/products/{productId}/colors/{colorVariantId}/sizes/{sizeStockId}
     // ═══════════════════════════════════════════════════════════════

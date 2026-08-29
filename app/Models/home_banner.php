@@ -1,7 +1,5 @@
 <?php
-
 namespace App\Models;
-
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Storage;
@@ -10,10 +8,6 @@ class home_banner extends Model
 {
     use HasFactory;
 
-    /**
-     * Table name (Eloquent's default guess would be "home_banners" already,
-     * since Laravel pluralizes + snake_cases the class name — but explicit is safer)
-     */
     protected $table = 'home_banners';
 
     protected $fillable = [
@@ -48,6 +42,17 @@ class home_banner extends Model
             : null;
     }
 
+    // Many-to-many: a banner can belong to multiple categories
+    public function categories()
+    {
+        return $this->belongsToMany(
+            Category::class,
+            'home_banner_categories',
+            'home_banner_id',
+            'category_id'
+        )->select('categories.id', 'categories.name')->withTimestamps();
+    }
+
     public function scopeActive($query)
     {
         return $query->where('status', true);
@@ -58,9 +63,6 @@ class home_banner extends Model
         return $query->orderBy('order_level', 'asc')->orderBy('id', 'desc');
     }
 
-    /**
-     * Auto-delete S3 files when a record is deleted
-     */
     protected static function booted()
     {
         static::deleting(function (home_banner $banner) {
@@ -70,6 +72,7 @@ class home_banner extends Model
             if ($banner->mobile_banner_path) {
                 Storage::disk('s3')->delete($banner->mobile_banner_path);
             }
+            // pivot rows cascade-delete via FK, no manual cleanup needed
         });
     }
 }

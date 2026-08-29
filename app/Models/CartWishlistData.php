@@ -1,39 +1,41 @@
 <?php
-
 namespace App\Models;
-
 use Illuminate\Database\Eloquent\Model;
-
 class CartWishlistData extends Model
 {
     protected $table = 'cart_wishlist_data';
-
     protected $fillable = [
         'user_id',
         'product_id',
         'product_color_variant_id',
         'product_size_stock_id',
+        'family_color_id',
+        'family_color_child_id',
         'type',
         'quantity',
     ];
-
     public function user()
     {
         return $this->belongsTo(FlyUser::class, 'user_id', 'user_id');
     }
-
     public function product()
     {
         return $this->belongsTo(Product::class, 'product_id');
     }
-
     public function colorVariant()
     {
         return $this->belongsTo(ProductColorVariant::class, 'product_color_variant_id');
     }
-
     public function sizeStock()
     {
         return $this->belongsTo(ProductSizeStock::class, 'product_size_stock_id');
+    }
+    public function familyColor()
+    {
+        return $this->belongsTo(FamilyColor::class);
+    }
+    public function familyColorChild()
+    {
+        return $this->belongsTo(FamilyColorChild::class);
     }
 }

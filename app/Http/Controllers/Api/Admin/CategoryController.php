@@ -52,11 +52,11 @@ class CategoryController extends Controller
         $request->validate([
             'name'        => 'required|string|max:255',
             'type'        => 'required|string',
-            'parent_id'   => 'nullable|exists:categories,id',
+            'parent_id'   => 'nullable',
             'order_level' => 'nullable|integer',
             'banner'      => 'required|image|mimes:jpeg,png,jpg|max:2048',
-            'icon'        => 'required|image|mimes:jpeg,png,jpg|max:512',
-            'cover'       => 'required|image|mimes:jpeg,png,jpg|max:2048',
+            'icon'        => 'image|mimes:jpeg,png,jpg|max:512',
+            'cover'       => 'image|mimes:jpeg,png,jpg|max:2048',
         ]);
 
         DB::beginTransaction();

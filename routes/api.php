@@ -24,6 +24,11 @@ use App\Http\Controllers\Api\BannerController;
 use App\Http\Controllers\Api\Admin\cartwhishlist;
 use App\Http\Controllers\Api\Admin\CartWishController;
 use App\Http\Controllers\Api\Admin\ReportController;
+use App\Http\Controllers\Api\Admin\FamilyColorController;
+use App\Http\Controllers\Api\Admin\BlogController;
+
+use App\Http\Controllers\Api\Admin\SpotlightController;
+
 
 Route::prefix('auth')->group(function () {
     // Regular Customer Registration Pipeline
@@ -84,6 +89,7 @@ Route::prefix('admin')->group(function () {
         Route::patch('/{id}/publish', [ProductController::class, 'togglePublish']);
         Route::patch('/{id}/today-sale', [ProductController::class, 'toggleTodaySale']);
         Route::patch('/{id}/flash-sale', [ProductController::class, 'updateFlashSale']);
+        Route::patch('/{id}/activate', [ProductController::class, 'activate']);
 
         // Delete color variant (cascades its images + sizes)
         Route::delete(
@@ -278,3 +284,58 @@ Route::prefix('admin/delhivery')->group(function () {
 
 Route::post('/auth/otp/send', [OtpAuthController::class, 'sendOtp']);
 Route::post('/auth/otp/verify', [OtpAuthController::class, 'verifyOtp']);
+
+
+Route::prefix('admin')->group(function () {
+    Route::get('family-colors', [FamilyColorController::class, 'index']);
+    Route::get('family-colors/{id}', [FamilyColorController::class, 'show']);
+    Route::post('family-colors', [FamilyColorController::class, 'store']);
+    Route::post('family-colors/{id}', [FamilyColorController::class, 'update']);
+    Route::patch('family-colors/{id}/toggle', [FamilyColorController::class, 'toggleActive']);
+    Route::delete('family-colors/{id}', [FamilyColorController::class, 'destroy']);
+    Route::delete('family-colors/{familyColorId}/children/{childId}', [FamilyColorController::class, 'destroyChild']);
+});
+
+
+// Family Colors (mirrors /admin/attributes/colors)
+Route::get('admin/attributes/family-colors', [AttributeController::class, 'indexFamilyColors']);
+Route::get('admin/attributes/family-colors/{id}', [AttributeController::class, 'showFamilyColor']);
+Route::post('admin/attributes/family-colors', [AttributeController::class, 'storeFamilyColor']);
+Route::post('admin/attributes/family-colors/{id}', [AttributeController::class, 'updateFamilyColor']);
+Route::delete('admin/attributes/family-colors/{id}', [AttributeController::class, 'deleteFamilyColor']);
+Route::delete('admin/attributes/family-colors/{familyId}/children/{childId}', [AttributeController::class, 'deleteFamilyColorChild']);
+
+
+
+// ---- ADMIN (auth + admin middleware — match your existing HomeBanner group) ----
+Route::prefix('admin')->group(function () {
+    Route::get('blogs',                     [BlogController::class, 'index']);
+    Route::post('blogs',                    [BlogController::class, 'store']);
+    Route::get('blogs/{id}',                [BlogController::class, 'show']);
+    Route::post('blogs/{id}',               [BlogController::class, 'update']); // POST for multipart + _method PUT
+    Route::patch('blogs/{id}/toggle-status', [BlogController::class, 'toggleStatus']);
+    Route::delete('blogs/{id}',             [BlogController::class, 'destroy']);
+});
+// ---- PUBLIC / USER SIDE (no auth) ----
+Route::prefix('blogs')->group(function () {
+    Route::get('/',      [BlogController::class, 'publicIndex']);
+    Route::get('/{id}',  [BlogController::class, 'publicShow']);
+});
+
+
+
+Route::get('admin/users/{userId}/cart-wishlist-summary', [CartWishController::class, 'cartWishSummary']);
+
+
+// ---- ADMIN — Spotlights (matches categories/products/blogs pattern) ----
+Route::prefix('admin/spotlights')->group(function () {
+    Route::get('/', [SpotlightController::class, 'index']);
+    Route::post('/', [SpotlightController::class, 'store']);
+    Route::get('/{id}', [SpotlightController::class, 'show']);
+    Route::post('/{id}', [SpotlightController::class, 'update']);
+    Route::patch('/{id}/publish', [SpotlightController::class, 'togglePublish']);
+    Route::patch('/{id}/toggle-active', [SpotlightController::class, 'toggleActive']);
+    Route::delete('/{id}', [SpotlightController::class, 'destroy']);
+});
+// ---- PUBLIC / USER SIDE (no auth) ----
+Route::get('/spotlights', [SpotlightController::class, 'publicIndex']);
