@@ -23,8 +23,8 @@ class AppServiceProvider extends ServiceProvider
     public function boot(): void
 {
     // Allow clean migrate:refresh without FK constraint errors
-    if (app()->runningInConsole()) {
-        DB::statement('SET FOREIGN_KEY_CHECKS=0;');
-    }
+    // if (app()->runningInConsole()) {
+    //     DB::statement('SET FOREIGN_KEY_CHECKS=0;');
+    // }
 }
 }
