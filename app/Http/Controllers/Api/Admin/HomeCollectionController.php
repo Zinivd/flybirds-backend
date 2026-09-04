@@ -1,15 +1,13 @@
 <?php
 namespace App\Http\Controllers\Api\Admin;
 use App\Http\Controllers\Controller;
-use App\Models\Category;
 use App\Models\Product;
-use App\Models\ProductColorVariant;
 use App\Models\CartWishlistData;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Collection;
 use Exception;
 
 class HomeCollectionController extends Controller
@@ -17,15 +15,13 @@ class HomeCollectionController extends Controller
     // Fixed limits — kept as named constants so the numbers are
     // explicit and consistent across both endpoints.
 
-    // ── Best Collections ──────────────────────────────────────────
-    private const BEST_COLLECTIONS_CATEGORY_LIMIT               = 2; // Top 2 categories when sales data exists
-    private const BEST_COLLECTIONS_CATEGORY_LIMIT_FALLBACK      = 2; // Latest 2 categories when no sales data yet
-    private const BEST_COLLECTIONS_PRODUCTS_PER_CATEGORY_SALES  = 2; // 2 best-selling products per category
-    private const BEST_COLLECTIONS_PRODUCTS_PER_CATEGORY_FALLBACK = 4; // 4 latest products per category (fallback)
-    private const BEST_COLLECTIONS_COLORS_PER_PRODUCT           = 2; // Top/first 2 colors shown per product
+    // Best Collections: always exactly 2 best-selling products,
+    // and for EACH of those products, its top 2 best-selling colors.
+    // Result = 2 products x 2 colors = 4 objects, one per product+color pair.
+    private const BEST_COLLECTIONS_PRODUCT_LIMIT        = 2;
+    private const BEST_COLLECTIONS_COLORS_PER_PRODUCT    = 2;
 
-    // ── Best Sellers ───────────────────────────────────────────────
-    private const BEST_SELLERS_CATEGORY_LIMIT = 4; // Best Sellers pulls from top 4 categories
+    private const BEST_SELLERS_CATEGORY_LIMIT = 3; // Best Sellers pulls from top 3 categories
     private const BEST_SELLERS_PRODUCT_LIMIT  = 8; // Best Sellers always shows top/recent 8 products
 
     // ═══════════════════════════════════════════════════════════════
@@ -46,25 +42,6 @@ class HomeCollectionController extends Controller
             $product->setAttribute('is_wishlisted', in_array($product->id, $wishlistedIds));
         });
         return $products;
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    // PRIVATE HELPER: Append category image URLs (banner/icon/cover)
-    // ═══════════════════════════════════════════════════════════════
-    private function appendCategoryUrls($category)
-    {
-        foreach (['banner_path', 'icon_path', 'cover_path'] as $field) {
-            $urlField = str_replace('_path', '_url', $field);
-            try {
-                $category->$urlField = $category->$field
-                    ? Storage::disk('s3')->temporaryUrl($category->$field, now()->addMinutes(30))
-                    : null;
-            } catch (Exception $e) {
-                Log::error('S3 URL Generation Error (Category #' . $category->id . '): ' . $e->getMessage());
-                $category->$urlField = null;
-            }
-        }
-        return $category;
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -99,7 +76,6 @@ class HomeCollectionController extends Controller
 
     // ═══════════════════════════════════════════════════════════════
     // PRIVATE HELPER: Safely fetch product sales data within categories.
-    // (Used by Best Sellers — pools products across all given categories.)
     // ═══════════════════════════════════════════════════════════════
     private function getProductSales(array $categoryIds, int $limit)
     {
@@ -127,253 +103,200 @@ class HomeCollectionController extends Controller
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // PRIVATE HELPER: Safely fetch product sales data PER category.
-    // Unlike getProductSales() (which pools products across all given
-    // categories into one ranked list for Best Sellers), this keeps
-    // the ranking scoped to each individual category_id — needed so
-    // Best Collections can show "top N products" per category rather
-    // than one mixed list.
+    // PRIVATE HELPER: Safely fetch the overall best-selling products
+    // (independent of category), ranked by total units sold.
+    // Used by bestCollections(). Returns null if sales data doesn't
+    // exist yet, so the caller can fall back to "latest added".
     // ═══════════════════════════════════════════════════════════════
-    private function getProductSalesByCategory(array $categoryIds)
+    private function getBestSellingProducts(int $limit)
     {
         if (!Schema::hasTable('order_items')) {
             return null;
         }
         try {
-            $rows = DB::table('order_items')
+            return DB::table('order_items')
                 ->join('products', 'products.id', '=', 'order_items.product_id')
-                ->whereIn('products.category_id', $categoryIds)
                 ->where('products.is_published', true)
                 ->select(
-                    'products.category_id',
                     'order_items.product_id',
                     DB::raw('SUM(order_items.quantity) as total_sold')
                 )
-                ->groupBy('products.category_id', 'order_items.product_id')
+                ->groupBy('order_items.product_id')
                 ->orderByDesc('total_sold')
+                ->limit($limit)
                 ->get();
-            return $rows;
         } catch (Exception $e) {
-            Log::error('Product Sales By Category Query Error: ' . $e->getMessage());
+            Log::error('Best Selling Products Query Error: ' . $e->getMessage());
             return null;
         }
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // PRIVATE HELPER: Safely fetch color-variant sales data for a set
-    // of products — used to find each product's best-selling color(s).
+    // PRIVATE HELPER: Safely fetch the best-selling COLOR VARIANTS
+    // for a single product, ranked by total units sold. Used by
+    // bestCollections() to find each product's top-selling colors.
+    // Returns null if sales data doesn't exist yet.
     // ═══════════════════════════════════════════════════════════════
-    private function getColorVariantSalesForProducts(array $productIds)
+    private function getBestSellingColorsForProduct(int $productId, int $limit)
     {
-        if (empty($productIds) || !Schema::hasTable('order_items')) {
+        if (!Schema::hasTable('order_items')) {
             return null;
         }
         try {
-            $rows = DB::table('order_items')
-                ->whereIn('product_id', $productIds)
+            return DB::table('order_items')
+                ->where('product_id', $productId)
                 ->whereNotNull('product_color_variant_id')
                 ->select(
-                    'product_id',
                     'product_color_variant_id',
                     DB::raw('SUM(quantity) as total_sold')
                 )
-                ->groupBy('product_id', 'product_color_variant_id')
+                ->groupBy('product_color_variant_id')
                 ->orderByDesc('total_sold')
+                ->limit($limit)
                 ->get();
-            return $rows;
         } catch (Exception $e) {
-            Log::error('Color Variant Sales Query Error: ' . $e->getMessage());
+            Log::error('Best Selling Colors Query Error (Product #' . $productId . '): ' . $e->getMessage());
             return null;
         }
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // PRIVATE HELPER: Attach the top-selling color(s) to a product.
-    // If $bySales is true and sales rows for this product exist, the
-    // colors are ranked by units sold (best-selling color(s) first).
-    // Otherwise falls back to the first-added color variant(s).
-    // ═══════════════════════════════════════════════════════════════
-    private function attachBestColorsToProduct(Product $product, $colorSalesForProduct, int $colorsPerProduct, bool $bySales)
-    {
-        if ($bySales && $colorSalesForProduct && $colorSalesForProduct->isNotEmpty()) {
-            $variantIds = $colorSalesForProduct->take($colorsPerProduct)->pluck('product_color_variant_id')->toArray();
-            $soldMap = $colorSalesForProduct->pluck('total_sold', 'product_color_variant_id');
-            $variants = ProductColorVariant::with(['familyColor', 'familyColorChild', 'galleryImages', 'thumbnailImage', 'sizeStocks'])
-                ->whereIn('id', $variantIds)
-                ->get()
-                ->keyBy('id');
-            $ordered = collect($variantIds)
-                ->map(function ($id) use ($variants, $soldMap) {
-                    $variant = $variants->get($id);
-                    if (!$variant) {
-                        return null;
-                    }
-                    $variant->setAttribute('total_sold', (int) ($soldMap[$id] ?? 0));
-                    $variant->setAttribute('is_best_selling_color', true);
-                    return $variant;
-                })
-                ->filter()
-                ->values();
-            if ($ordered->isNotEmpty()) {
-                $product->setAttribute('colors', $ordered);
-                return $product;
-            }
-        }
-        // Fallback: first N color variants added to the product
-        $firstColors = $product->colorVariants()
-            ->with(['familyColor', 'familyColorChild', 'galleryImages', 'thumbnailImage', 'sizeStocks'])
-            ->oldest()
-            ->limit($colorsPerProduct)
-            ->get()
-            ->each(function ($variant) {
-                $variant->setAttribute('total_sold', 0);
-                $variant->setAttribute('is_best_selling_color', false);
-            });
-        $product->setAttribute('colors', $firstColors);
-        return $product;
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    // PRIVATE HELPER: Build [category_id => Collection<Product>] for
-    // the sales-ranked path — top products per category, each product
-    // carrying its top-selling color(s).
-    // ═══════════════════════════════════════════════════════════════
-    private function buildProductsForCategoriesFromSales(array $categoryIds, int $productsPerCategory, int $colorsPerProduct, $userId = null): array
-    {
-        $productSales = $this->getProductSalesByCategory($categoryIds);
-        if (!$productSales || $productSales->isEmpty()) {
-            return [];
-        }
-        // groupBy() preserves the original (already sales-desc-sorted)
-        // order within each group, so take(N) after grouping gives the
-        // top N products per category.
-        $groupedByCategory = $productSales->groupBy('category_id')->map(function ($rows) use ($productsPerCategory) {
-            return $rows->take($productsPerCategory);
-        });
-        $allProductIds = $groupedByCategory->flatten(1)->pluck('product_id')->unique()->values()->toArray();
-        if (empty($allProductIds)) {
-            return [];
-        }
-        $products = Product::with(['category'])->whereIn('id', $allProductIds)->get()->keyBy('id');
-        $colorSales = $this->getColorVariantSalesForProducts($allProductIds);
-        $colorSalesByProduct = $colorSales ? $colorSales->groupBy('product_id') : collect();
-        $result = [];
-        foreach ($groupedByCategory as $categoryId => $rows) {
-            $categoryProducts = collect();
-            foreach ($rows as $row) {
-                $baseProduct = $products->get($row->product_id);
-                if (!$baseProduct) {
-                    continue;
-                }
-                $product = clone $baseProduct; // avoid shared instance state across categories
-                $product->setAttribute('total_sold', (int) $row->total_sold);
-                $product->setAttribute('is_fallback', false);
-                $productColorSales = $colorSalesByProduct->get($row->product_id);
-                $this->attachBestColorsToProduct($product, $productColorSales, $colorsPerProduct, true);
-                $categoryProducts->push($product);
-            }
-            if ($userId) {
-                $this->attachWishlistFlagToCollection($categoryProducts, $userId);
-            } else {
-                $categoryProducts->each(fn($p) => $p->setAttribute('is_wishlisted', false));
-            }
-            $result[$categoryId] = $categoryProducts->values();
-        }
-        return $result;
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    // PRIVATE HELPER: Fallback path (no sales data) — latest products
-    // for a single category, each carrying its first-added color(s).
-    // ═══════════════════════════════════════════════════════════════
-    private function buildProductsForCategoryFallback(int $categoryId, int $productsPerCategory, int $colorsPerProduct, $userId = null)
-    {
-        $products = Product::with(['category'])
-            ->where('category_id', $categoryId)
-            ->where('is_published', true)
-            ->latest()
-            ->limit($productsPerCategory)
-            ->get();
-        $products->each(function ($product) use ($colorsPerProduct) {
-            $product->setAttribute('total_sold', 0);
-            $product->setAttribute('is_fallback', true);
-            $this->attachBestColorsToProduct($product, null, $colorsPerProduct, false);
-        });
-        if ($userId) {
-            $this->attachWishlistFlagToCollection($products, $userId);
-        } else {
-            $products->each(fn($p) => $p->setAttribute('is_wishlisted', false));
-        }
-        return $products->values();
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    // GET /admin/home/best-collections?user_id=5
+    // PRIVATE HELPER: Given a loaded Product (with colorVariants +
+    // their familyColor/familyColorChild/galleryImages/thumbnailImage
+    // relations already eager-loaded) and an optional set of
+    // "top selling color variant" rows, build one flat response
+    // object PER color variant (up to $limit), each carrying the
+    // full product payload plus that single color's details.
     //
-    // Returns the top 2 categories (ranked by sales if data exists,
-    // otherwise the 2 most recently added categories). Each category
-    // now also carries its products:
-    //   - Sales data exists: top 2 best-selling products per category,
-    //     each with its top 2 best-selling colors.
-    //   - No sales data yet: 4 latest published products per category,
-    //     each with its first 2 color variants.
+    // If $topColorRows has fewer entries than $limit (e.g. the
+    // product only ever sold in 1 color, or we're in the no-sales
+    // fallback path), the remaining slots are filled from the
+    // product's other color variants (ordered by id) so we still
+    // return up to $limit entries per product wherever possible.
+    // ═══════════════════════════════════════════════════════════════
+    private function buildProductColorEntries(
+        Product $product,
+        $topColorRows,
+        int $limit,
+        int $productTotalSold,
+        bool $isFallback
+    ): Collection {
+        $variants = $product->colorVariants; // already eager-loaded
+
+        $selectedVariants = collect();
+        $soldMap = [];
+
+        if ($topColorRows && $topColorRows->isNotEmpty()) {
+            foreach ($topColorRows as $row) {
+                $variant = $variants->firstWhere('id', $row->product_color_variant_id);
+                if ($variant) {
+                    $soldMap[$variant->id] = (int) $row->total_sold;
+                    $selectedVariants->push($variant);
+                }
+            }
+        }
+
+        // Top up to $limit using the product's remaining color variants
+        // (covers: fallback mode with no sales data at all, or a
+        // product that hasn't sold in enough distinct colors yet).
+        if ($selectedVariants->count() < $limit) {
+            $selectedIds = $selectedVariants->pluck('id')->toArray();
+            $remaining = $variants->whereNotIn('id', $selectedIds)->sortBy('id')->values();
+            foreach ($remaining as $variant) {
+                if ($selectedVariants->count() >= $limit) {
+                    break;
+                }
+                $selectedVariants->push($variant);
+            }
+        }
+
+        $selectedVariants = $selectedVariants->take($limit);
+
+        // Base product payload, shared across every color entry for
+        // this product — strip the full nested color_variants list
+        // since each entry below carries only its own single color.
+        $baseProductData = $product->toArray();
+        unset($baseProductData['color_variants']);
+
+        return $selectedVariants->map(function ($variant) use ($baseProductData, $productTotalSold, $isFallback, $soldMap) {
+            $entry = $baseProductData;
+            $entry['total_sold']  = $productTotalSold;
+            $entry['is_fallback'] = $isFallback;
+            $entry['color_variant'] = [
+                'id'                 => $variant->id,
+                'family_color'       => $variant->familyColor,
+                'family_color_child' => $variant->familyColorChild,
+                'gallery_images'     => $variant->galleryImages,
+                'thumbnail_image'    => $variant->thumbnailImage,
+                'color_total_sold'   => $soldMap[$variant->id] ?? 0,
+            ];
+            return $entry;
+        });
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // GET /admin/home/best-collections
+    //
+    // Finds the top 2 best-selling products, then for EACH of those
+    // 2 products finds its top 2 best-selling colors. Every
+    // product+color pairing is returned as its own object in the
+    // response array — 2 products x 2 colors = 4 objects.
+    //
+    // If there's no sales data yet, falls back to the 2 most recently
+    // added products, taking the first 2 color variants of each
+    // (still 4 objects total, each flagged is_fallback: true).
     // ═══════════════════════════════════════════════════════════════
     public function bestCollections(Request $request)
     {
         try {
-            $categoryLimit           = self::BEST_COLLECTIONS_CATEGORY_LIMIT;
-            $productsPerCategorySales = self::BEST_COLLECTIONS_PRODUCTS_PER_CATEGORY_SALES;
-            $colorsPerProduct        = self::BEST_COLLECTIONS_COLORS_PER_PRODUCT;
-            $userId = $request->query('user_id');
+            $productLimit = self::BEST_COLLECTIONS_PRODUCT_LIMIT;
+            $colorLimit   = self::BEST_COLLECTIONS_COLORS_PER_PRODUCT;
 
-            $categorySales = $this->getCategorySales($categoryLimit);
+            $withRelations = [
+                'category',
+                'colorVariants.familyColor',
+                'colorVariants.familyColorChild',
+                'colorVariants.galleryImages',
+                'colorVariants.thumbnailImage',
+            ];
+
+            $bestProducts = $this->getBestSellingProducts($productLimit);
 
             // Case 1: We have real sales-based ranking
-            if ($categorySales && $categorySales->isNotEmpty()) {
-                $categoryIds = $categorySales->pluck('category_id')->toArray();
-                $categories  = Category::whereIn('id', $categoryIds)->get()->keyBy('id');
-                $productsByCategory = $this->buildProductsForCategoriesFromSales(
-                    $categoryIds,
-                    $productsPerCategorySales,
-                    $colorsPerProduct,
-                    $userId
-                );
-                $result = $categorySales->map(function ($row) use ($categories, $productsByCategory) {
-                    $category = $categories->get($row->category_id);
-                    if (!$category) {
-                        return null;
+            if ($bestProducts && $bestProducts->isNotEmpty()) {
+                $result = collect();
+                foreach ($bestProducts as $row) {
+                    $product = Product::with($withRelations)->find($row->product_id);
+                    if (!$product) {
+                        continue;
                     }
-                    $category = $this->appendCategoryUrls($category);
-                    $category->setAttribute('total_sold', (int) $row->total_sold);
-                    $category->setAttribute('distinct_products_sold', (int) $row->distinct_products_sold);
-                    $category->setAttribute('is_fallback', false);
-                    $category->setAttribute('products', $productsByCategory[$row->category_id] ?? collect());
-                    return $category;
-                })->filter()->values();
+                    $topColors = $this->getBestSellingColorsForProduct($product->id, $colorLimit);
+                    $entries = $this->buildProductColorEntries(
+                        $product,
+                        $topColors,
+                        $colorLimit,
+                        (int) $row->total_sold,
+                        false
+                    );
+                    $result = $result->merge($entries);
+                }
                 if ($result->isNotEmpty()) {
-                    return response()->json(['status' => 'success', 'data' => $result], 200);
+                    return response()->json(['status' => 'success', 'data' => $result->values()], 200);
                 }
             }
 
-            // Case 2: No sales data yet — fall back to latest added categories
-            $fbCategoryLimit       = self::BEST_COLLECTIONS_CATEGORY_LIMIT_FALLBACK;
-            $fbProductsPerCategory = self::BEST_COLLECTIONS_PRODUCTS_PER_CATEGORY_FALLBACK;
-            $fallback = Category::latest()->limit($fbCategoryLimit)->get();
-            $fallback = $fallback->map(function ($category) use ($fbProductsPerCategory, $colorsPerProduct, $userId) {
-                $category = $this->appendCategoryUrls($category);
-                $category->setAttribute('total_sold', 0);
-                $category->setAttribute('distinct_products_sold', 0);
-                $category->setAttribute('is_fallback', true);
-                $category->setAttribute(
-                    'products',
-                    $this->buildProductsForCategoryFallback($category->id, $fbProductsPerCategory, $colorsPerProduct, $userId)
-                );
-                return $category;
-            });
+            // Case 2: No sales data yet — fall back to latest added products
+            $fallbackProducts = Product::with($withRelations)->latest()->limit($productLimit)->get();
+            $result = collect();
+            foreach ($fallbackProducts as $product) {
+                $entries = $this->buildProductColorEntries($product, null, $colorLimit, 0, true);
+                $result = $result->merge($entries);
+            }
+
             return response()->json([
                 'status'  => 'success',
-                'message' => $fallback->isEmpty() ? 'No categories found.' : 'Showing latest added categories (no sales data yet).',
-                'data'    => $fallback,
+                'message' => $result->isEmpty() ? 'No products found.' : 'Showing latest added products (no sales data yet).',
+                'data'    => $result->values(),
             ], 200);
         } catch (Exception $e) {
             Log::error('Best Collections Error: ' . $e->getMessage());
@@ -387,7 +310,7 @@ class HomeCollectionController extends Controller
     // ═══════════════════════════════════════════════════════════════
     // GET /admin/home/best-sellers?user_id=5
     //
-    // Pulls from the top 4 categories by sales, then returns the
+    // Pulls from the top 3 categories by sales, then returns the
     // top 8 products (by sales) within those categories. Falls back
     // to the 8 most recently added published products if no sales
     // data exists yet.
