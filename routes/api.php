@@ -39,6 +39,8 @@ Route::prefix('auth')->group(function () {
     Route::post('/admin/register/verify', [AuthController::class, 'adminRegisterVerify']);
     // Core Unified Login Gate (Pass name('login') to prevent RouteNotException errors)
     Route::post('/login', [AuthController::class, 'login'])->name('login');
+
+    Route::post('/token/check', [AuthController::class, 'checkToken']);
     // Protected User Profile Modifier Route Group
     Route::middleware('auth:api')->group(function () {
         Route::put('/profile/update/{user_id}', [AuthController::class, 'updateProfile']);

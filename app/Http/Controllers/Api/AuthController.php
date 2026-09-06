@@ -15,6 +15,8 @@ use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Str;
 use Tymon\JWTAuth\Facades\JWTAuth;
 use Illuminate\Support\Facades\RateLimiter;
+use Tymon\JWTAuth\Exceptions\TokenExpiredException;
+use Tymon\JWTAuth\Exceptions\TokenInvalidException;
 
 class AuthController extends Controller
 {
@@ -672,6 +674,111 @@ class AuthController extends Controller
                 'status' => 'error',
                 'message' => $e->getMessage()
             ], 400);
+        }
+    }
+
+
+    // ============================================================
+    // 0. VERIFY / AUTO-REFRESH ACCESS TOKEN
+    //
+    // Client sends both tokens it currently holds. If access_token is
+    // still valid, it's echoed back unchanged. If it's expired (but
+    // not tampered/blacklisted), refresh_token is used to silently
+    // issue a brand new access+refresh pair, so the client never has
+    // to force a full re-login just because the access token expired.
+    // ============================================================
+    public function checkToken(Request $request)
+    {
+        $request->validate([
+            'access_token'  => 'required|string',
+            'refresh_token' => 'nullable|string',
+        ]);
+        // Step 1: try the access token as-is.
+        try {
+            $user = JWTAuth::setToken($request->access_token)->authenticate();
+            if ($user) {
+                return response()->json([
+                    'status'       => 'success',
+                    'message'      => 'Access token is valid.',
+                    'token_valid'  => true,
+                    'refreshed'    => false,
+                    'user_id'      => $user->user_id,
+                    'access_token' => $request->access_token,
+                    'user_type'    => $user->user_type,
+                ], 200);
+            }
+        } catch (TokenExpiredException $e) {
+            // Expected path when the token has simply expired — fall
+            // through to the refresh-token flow below.
+        } catch (TokenInvalidException $e) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Access token is invalid or has been tampered with.',
+            ], 401);
+        } catch (\Exception $e) {
+            Log::warning('Token verify unexpected error: ' . $e->getMessage());
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Unable to verify access token.',
+            ], 401);
+        }
+        // Step 2: access token is expired — attempt to use refresh_token.
+        if (!$request->filled('refresh_token')) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Access token expired. Please provide a refresh_token or log in again.',
+            ], 401);
+        }
+        try {
+            $refreshPayload = JWTAuth::setToken($request->refresh_token)->getPayload();
+            if (!$refreshPayload->get('is_refresh')) {
+                return response()->json([
+                    'status'  => 'error',
+                    'message' => 'The provided token is not a valid refresh token.',
+                ], 401);
+            }
+            $user = JWTAuth::setToken($request->refresh_token)->authenticate();
+            if (!$user) {
+                return response()->json([
+                    'status'  => 'error',
+                    'message' => 'User associated with this refresh token no longer exists.',
+                ], 401);
+            }
+            if ($user->is_locked) {
+                return response()->json([
+                    'status'  => 'error',
+                    'message' => 'Your account has been locked. Please contact support.',
+                ], 403);
+            }
+            [$newAccessToken, $newRefreshToken] = $this->issueTokens($user);
+            return response()->json([
+                'status'        => 'success',
+                'message'       => 'Access token had expired. New tokens issued via refresh token.',
+                'token_valid'   => false,
+                'refreshed'     => true,
+                'user_id'       => $user->user_id,
+                'access_token'  => $newAccessToken,
+                'refresh_token' => $newRefreshToken,
+                'token_type'    => 'bearer',
+                'expires_in'    => config('jwt.ttl') * 60,
+                'user_type'     => $user->user_type,
+            ], 200);
+        } catch (TokenExpiredException $e) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Refresh token has also expired. Please log in again.',
+            ], 401);
+        } catch (TokenInvalidException $e) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Refresh token is invalid or has been tampered with.',
+            ], 401);
+        } catch (\Exception $e) {
+            Log::error('Refresh token verify error: ' . $e->getMessage());
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Failed to refresh access token.',
+            ], 401);
         }
     }
 }
