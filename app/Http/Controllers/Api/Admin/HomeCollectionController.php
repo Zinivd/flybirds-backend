@@ -1,5 +1,7 @@
 <?php
+
 namespace App\Http\Controllers\Api\Admin;
+
 use App\Http\Controllers\Controller;
 use App\Models\Product;
 use App\Models\CartWishlistData;
@@ -328,15 +330,17 @@ class HomeCollectionController extends Controller
                 if ($productSales && $productSales->isNotEmpty()) {
                     $productIds = $productSales->pluck('product_id')->toArray();
                     $soldMap    = $productSales->pluck('total_sold', 'product_id');
+                    // Case 1: Real sales data exists for categories
                     $products = Product::with([
                         'category',
-                        'colorVariants.color',
+                        'colorVariants.familyColor',
+                        'colorVariants.familyColorChild',
                         'colorVariants.galleryImages',
                         'colorVariants.thumbnailImage',
                         'colorVariants.sizeStocks',
                     ])
-                    ->whereIn('id', $productIds)
-                    ->get();
+                        ->whereIn('id', $productIds)
+                        ->get();
                     $ordered = $products->sortBy(function ($product) use ($productIds) {
                         return array_search($product->id, $productIds);
                     })->values();
@@ -354,15 +358,16 @@ class HomeCollectionController extends Controller
             // Case 2: No sales data yet — fall back to latest added published products
             $fallbackProducts = Product::with([
                 'category',
-                'colorVariants.color',
+                'colorVariants.familyColor',
+                'colorVariants.familyColorChild',
                 'colorVariants.galleryImages',
                 'colorVariants.thumbnailImage',
                 'colorVariants.sizeStocks',
             ])
-            ->where('is_published', true)
-            ->latest()
-            ->limit($productLimit)
-            ->get();
+                ->where('is_published', true)
+                ->latest()
+                ->limit($productLimit)
+                ->get();
             $fallbackProducts->each(function ($product) {
                 $product->setAttribute('total_sold', 0);
                 $product->setAttribute('is_fallback', true);
