@@ -1,4 +1,5 @@
 <?php
+
 namespace App\Http\Controllers\Api\Admin;
 
 use App\Http\Controllers\Controller;
@@ -103,10 +104,19 @@ class FamilyColorController extends Controller
 
     // ═══════════════════════════════════════════════════════════
     // POST /admin/family-colors/{id}
-    // Same payload shape as store(). Children WITHOUT an 'id' are
-    // created new; children WITH an 'id' are updated. Any existing
-    // child not present in the payload is left untouched (use the
-    // destroyChild endpoint to remove one explicitly).
+    // Edits the parent (name/code) AND its children in one call.
+    // Payload:
+    // {
+    //   "name": "Blue Family",           // optional
+    //   "code": "#0000FF",               // optional
+    //   "children": [
+    //     { "id": 3, "name": "Sky Blue Updated", "code": "#88D0F0" },  // has id -> UPDATE
+    //     { "name": "Teal Blue", "code": "#008080" }                   // no id -> CREATE
+    //   ]
+    // }
+    // Children WITHOUT an 'id' are created new; children WITH an 'id'
+    // are updated. Any existing child not present in the payload is
+    // left untouched (use destroyChild to remove one explicitly).
     // ═══════════════════════════════════════════════════════════
     public function update(Request $request, $id)
     {
@@ -121,7 +131,7 @@ class FamilyColorController extends Controller
                 'name'                => 'sometimes|string|max:255',
                 'code'                => 'sometimes|string|max:20',
                 'children'            => 'nullable|array',
-                'children.*.id'       => 'nullable|exists:family_color_children,id',
+                'children.*.id'       => 'nullable|integer|exists:family_color_children,id',
                 'children.*.name'     => 'required_with:children|string|max:255',
                 'children.*.code'     => 'required_with:children|string|max:20',
             ]);
@@ -135,32 +145,115 @@ class FamilyColorController extends Controller
 
         DB::beginTransaction();
         try {
-            $familyColor->update(array_filter($validated, fn($k) => !in_array($k, ['children']), ARRAY_FILTER_USE_KEY));
+            // Update parent fields only if provided
+            $familyColor->update(array_filter(
+                $validated,
+                fn($k) => in_array($k, ['name', 'code']),
+                ARRAY_FILTER_USE_KEY
+            ));
+
+            $createdCount = 0;
+            $updatedCount = 0;
 
             foreach ($validated['children'] ?? [] as $child) {
                 if (!empty($child['id'])) {
-                    FamilyColorChild::where('id', $child['id'])
+                    $affected = FamilyColorChild::where('id', $child['id'])
                         ->where('family_color_id', $familyColor->id)
-                        ->update(['name' => $child['name'], 'code' => $child['code']]);
+                        ->update([
+                            'name' => $child['name'],
+                            'code' => $child['code'],
+                        ]);
+
+                    if ($affected) {
+                        $updatedCount++;
+                    } else {
+                        // id existed but belonged to a different family_color — reject silently-safe path:
+                        // treat it as a create under THIS family instead of failing the whole request.
+                        FamilyColorChild::create([
+                            'family_color_id' => $familyColor->id,
+                            'name'            => $child['name'],
+                            'code'            => $child['code'],
+                        ]);
+                        $createdCount++;
+                    }
                 } else {
                     FamilyColorChild::create([
                         'family_color_id' => $familyColor->id,
                         'name'            => $child['name'],
                         'code'            => $child['code'],
                     ]);
+                    $createdCount++;
                 }
             }
 
             DB::commit();
             return response()->json([
                 'status'  => 'success',
-                'message' => 'Family color updated successfully.',
-                'data'    => $familyColor->load('children'),
+                'message' => "Family color updated successfully. ({$updatedCount} child updated, {$createdCount} child added)",
+                'data'    => $familyColor->fresh()->load('children'),
             ], 200);
         } catch (Exception $e) {
             DB::rollBack();
             Log::error('Family Color Update Error: ' . $e->getMessage());
             return response()->json(['status' => 'error', 'message' => 'Failed to update family color.'], 500);
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // POST /admin/family-colors/{id}/children
+    // Bulk-add NEW child colors to an existing parent, without
+    // touching the parent's own name/code or existing children.
+    // Payload:
+    // {
+    //   "children": [
+    //     { "name": "Sky Blue", "code": "#87CEEB" },
+    //     { "name": "Navy Blue", "code": "#000080" }
+    //   ]
+    // }
+    // ═══════════════════════════════════════════════════════════
+    public function addChildren(Request $request, $id)
+    {
+        try {
+            $familyColor = FamilyColor::findOrFail($id);
+        } catch (ModelNotFoundException $e) {
+            return response()->json(['status' => 'error', 'message' => 'Family color not found.'], 404);
+        }
+
+        try {
+            $validated = $request->validate([
+                'children'          => 'required|array|min:1',
+                'children.*.name'   => 'required|string|max:255',
+                'children.*.code'   => 'required|string|max:20',
+            ]);
+        } catch (ValidationException $e) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Validation failed.',
+                'errors'  => $e->errors(),
+            ], 422);
+        }
+
+        DB::beginTransaction();
+        try {
+            $newChildren = [];
+            foreach ($validated['children'] as $child) {
+                $newChildren[] = FamilyColorChild::create([
+                    'family_color_id' => $familyColor->id,
+                    'name'            => $child['name'],
+                    'code'            => $child['code'],
+                ]);
+            }
+
+            DB::commit();
+            return response()->json([
+                'status'  => 'success',
+                'message' => count($newChildren) . ' child color(s) added successfully.',
+                'data'    => $familyColor->fresh()->load('children'),
+            ], 201);
+        } catch (Exception $e) {
+            DB::rollBack();
+            Log::error('Family Color Add Children Error: ' . $e->getMessage());
+            return response()->json(['status' => 'error', 'message' => 'Failed to add child colors.'], 500);
         }
     }
 
@@ -173,6 +266,7 @@ class FamilyColorController extends Controller
             $familyColor = FamilyColor::findOrFail($id);
             $familyColor->is_active = !$familyColor->is_active;
             $familyColor->save();
+
             return response()->json([
                 'status'  => 'success',
                 'message' => $familyColor->is_active ? 'Activated.' : 'Deactivated.',
@@ -183,6 +277,30 @@ class FamilyColorController extends Controller
         } catch (Exception $e) {
             Log::error('Family Color Toggle Error: ' . $e->getMessage());
             return response()->json(['status' => 'error', 'message' => 'Failed to toggle status.'], 500);
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // PATCH /admin/family-colors/children/{childId}/toggle
+    // (optional parity toggle for an individual child color)
+    // ═══════════════════════════════════════════════════════════
+    public function toggleChildActive($childId)
+    {
+        try {
+            $child = FamilyColorChild::findOrFail($childId);
+            $child->is_active = !$child->is_active;
+            $child->save();
+
+            return response()->json([
+                'status'  => 'success',
+                'message' => $child->is_active ? 'Child activated.' : 'Child deactivated.',
+                'data'    => $child,
+            ], 200);
+        } catch (ModelNotFoundException $e) {
+            return response()->json(['status' => 'error', 'message' => 'Child color not found.'], 404);
+        } catch (Exception $e) {
+            Log::error('Family Color Child Toggle Error: ' . $e->getMessage());
+            return response()->json(['status' => 'error', 'message' => 'Failed to toggle child status.'], 500);
         }
     }
 

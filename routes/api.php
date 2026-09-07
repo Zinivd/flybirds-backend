@@ -1,4 +1,5 @@
 <?php
+
 use App\Http\Controllers\Api\Admin\AttributeController;
 use App\Http\Controllers\Api\Admin\HomeBanner;
 use App\Http\Controllers\Api\Admin\HomeCollectionController;
@@ -51,9 +52,10 @@ Route::prefix('auth')->group(function () {
 });
 
 Route::prefix('admin')->group(function () {
-    Route::post('/video-reels', [VideoReelController::class, 'store']);
-    Route::get('/video-reels', [VideoReelController::class, 'index']);
-    Route::patch('/video-reels/{id}/status', [VideoReelController::class, 'updateStatus']);
+   Route::post('/video-reels', [VideoReelController::class, 'store']);
+Route::get('/video-reels', [VideoReelController::class, 'index']);
+Route::patch('/video-reels/{id}/status', [VideoReelController::class, 'updateStatus']);
+Route::patch('/video-reels/{id}/product', [VideoReelController::class, 'updateProduct']);
 
     // Categories
     Route::prefix('categories')->group(function () {
@@ -200,6 +202,13 @@ Route::prefix('banners')->group(function () {
     Route::post('/{id}', [HomeBanner::class, 'update']);
     Route::delete('/{id}', [HomeBanner::class, 'destroy']);
     Route::get('/{id}/download/{type}', [HomeBanner::class, 'download']);
+
+    // Publish / Unpublish
+    Route::patch('/{id}/publish', [HomeBanner::class, 'publish']);
+    Route::patch('/{id}/unpublish', [HomeBanner::class, 'unpublish']);
+
+    // Active / Inactive toggle
+    Route::patch('/{id}/toggle-active', [HomeBanner::class, 'toggleActive']);
 });
 
 // Cart
@@ -280,7 +289,7 @@ Route::prefix('admin/delhivery')->group(function () {
     Route::post('/pickup/create', [DelhiveryController::class, 'createPickup']);
     Route::post('/ndr/update', [DelhiveryController::class, 'updateNDR']);
     Route::post('/ewaybill/update', [DelhiveryController::class, 'updateEwaybill']);
-      Route::get('/ndr/list', [DelhiveryController::class, 'listNdr']);
+    Route::get('/ndr/list', [DelhiveryController::class, 'listNdr']);
     Route::post('/ndr/sync', [DelhiveryController::class, 'syncNdrStatus']);
 });
 
@@ -293,7 +302,9 @@ Route::prefix('admin')->group(function () {
     Route::get('family-colors/{id}', [FamilyColorController::class, 'show']);
     Route::post('family-colors', [FamilyColorController::class, 'store']);
     Route::post('family-colors/{id}', [FamilyColorController::class, 'update']);
+    Route::post('family-colors/{id}/children', [FamilyColorController::class, 'addChildren']); // NEW — bulk add children
     Route::patch('family-colors/{id}/toggle', [FamilyColorController::class, 'toggleActive']);
+    Route::patch('family-colors/children/{childId}/toggle', [FamilyColorController::class, 'toggleChildActive']); // NEW — optional
     Route::delete('family-colors/{id}', [FamilyColorController::class, 'destroy']);
     Route::delete('family-colors/{familyColorId}/children/{childId}', [FamilyColorController::class, 'destroyChild']);
 });

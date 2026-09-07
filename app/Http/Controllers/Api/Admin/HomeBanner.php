@@ -1,5 +1,7 @@
 <?php
+
 namespace App\Http\Controllers\Api\Admin;
+
 use App\Http\Controllers\Controller;
 use App\Models\home_banner;
 use Exception;
@@ -17,16 +19,28 @@ class HomeBanner extends Controller
     {
         try {
             $query = home_banner::with('categories');
+
             if ($request->filled('search')) {
                 $query->where('title', 'like', '%' . $request->search . '%');
             }
+
             if ($request->filled('category_id')) {
                 $query->whereHas('categories', function ($q) use ($request) {
                     $q->where('categories.id', $request->category_id);
                 });
             }
+
+            if ($request->filled('published')) {
+                $query->where('published', filter_var($request->published, FILTER_VALIDATE_BOOLEAN));
+            }
+
+            if ($request->filled('active')) {
+                $query->where('active', filter_var($request->active, FILTER_VALIDATE_BOOLEAN));
+            }
+
             $banners = $query->ordered()
                               ->paginate($request->get('per_page', 10));
+
             return response()->json([
                 'status'  => 'success',
                 'message' => 'Home banners fetched successfully',
@@ -40,9 +54,6 @@ class HomeBanner extends Controller
 
     /**
      * Store a new home banner (web + mobile images uploaded to S3)
-     * Accepts category_ids as an array (single or multiple values):
-     *   category_ids[] = 1
-     *   category_ids[] = 2
      */
     public function store(Request $request)
     {
@@ -53,16 +64,24 @@ class HomeBanner extends Controller
             'mobile_banner'     => 'required|image|mimes:jpeg,png,jpg,webp|max:2048',
             'category_ids'      => 'nullable|array',
             'category_ids.*'    => 'integer|exists:categories,id',
+            'published'         => 'nullable|boolean',
+            'active'            => 'nullable|boolean',
         ]);
+
         DB::beginTransaction();
         try {
             $banner = new home_banner($request->only(['title', 'order_level']));
+
+            $banner->published = $request->boolean('published', false);
+            $banner->active    = $request->boolean('active', true);
+
             if ($request->hasFile('web_banner')) {
                 $banner->web_banner_path = $request->file('web_banner')->store('home-banners/web', 's3');
             }
             if ($request->hasFile('mobile_banner')) {
                 $banner->mobile_banner_path = $request->file('mobile_banner')->store('home-banners/mobile', 's3');
             }
+
             $banner->save();
 
             if ($request->filled('category_ids')) {
@@ -102,7 +121,6 @@ class HomeBanner extends Controller
 
     /**
      * Update home banner (replace images if new ones provided, delete old ones from S3)
-     * category_ids fully replaces the banner's category assignments when present.
      */
     public function update(Request $request, $id)
     {
@@ -113,11 +131,22 @@ class HomeBanner extends Controller
             'mobile_banner'     => 'nullable|image|mimes:jpeg,png,jpg,webp|max:2048',
             'category_ids'      => 'nullable|array',
             'category_ids.*'    => 'integer|exists:categories,id',
+            'published'         => 'nullable|boolean',
+            'active'            => 'nullable|boolean',
         ]);
+
         DB::beginTransaction();
         try {
             $banner = home_banner::findOrFail($id);
             $banner->fill($request->only(['title', 'order_level']));
+
+            if ($request->has('published')) {
+                $banner->published = $request->boolean('published');
+            }
+            if ($request->has('active')) {
+                $banner->active = $request->boolean('active');
+            }
+
             if ($request->hasFile('web_banner')) {
                 if ($banner->web_banner_path) {
                     Storage::disk('s3')->delete($banner->web_banner_path);
@@ -130,6 +159,7 @@ class HomeBanner extends Controller
                 }
                 $banner->mobile_banner_path = $request->file('mobile_banner')->store('home-banners/mobile', 's3');
             }
+
             $banner->save();
 
             if ($request->has('category_ids')) {
@@ -150,6 +180,71 @@ class HomeBanner extends Controller
     }
 
     /**
+     * Publish a banner
+     */
+    public function publish($id)
+    {
+        try {
+            $banner = home_banner::findOrFail($id);
+            $banner->published = true;
+            $banner->save();
+
+            return response()->json([
+                'status'  => 'success',
+                'message' => 'Home banner published successfully',
+                'data'    => $banner->load('categories'),
+            ], 200);
+        } catch (Exception $e) {
+            Log::error('HomeBanner Publish Error: ' . $e->getMessage());
+            return response()->json(['status' => 'error', 'message' => 'Failed to publish home banner.'], 500);
+        }
+    }
+
+    /**
+     * Unpublish a banner
+     */
+    public function unpublish($id)
+    {
+        try {
+            $banner = home_banner::findOrFail($id);
+            $banner->published = false;
+            $banner->save();
+
+            return response()->json([
+                'status'  => 'success',
+                'message' => 'Home banner unpublished successfully',
+                'data'    => $banner->load('categories'),
+            ], 200);
+        } catch (Exception $e) {
+            Log::error('HomeBanner Unpublish Error: ' . $e->getMessage());
+            return response()->json(['status' => 'error', 'message' => 'Failed to unpublish home banner.'], 500);
+        }
+    }
+
+    /**
+     * Toggle active/inactive status
+     */
+    public function toggleActive($id)
+    {
+        try {
+            $banner = home_banner::findOrFail($id);
+            $banner->active = ! $banner->active;
+            $banner->save();
+
+            return response()->json([
+                'status'  => 'success',
+                'message' => $banner->active
+                    ? 'Home banner activated successfully'
+                    : 'Home banner deactivated successfully',
+                'data'    => $banner->load('categories'),
+            ], 200);
+        } catch (Exception $e) {
+            Log::error('HomeBanner ToggleActive Error: ' . $e->getMessage());
+            return response()->json(['status' => 'error', 'message' => 'Failed to update active status.'], 500);
+        }
+    }
+
+    /**
      * Delete home banner (S3 files + pivot rows auto-removed via model hook / FK cascade)
      */
     public function destroy($id)
@@ -159,6 +254,7 @@ class HomeBanner extends Controller
             $banner = home_banner::findOrFail($id);
             $banner->delete();
             DB::commit();
+
             return response()->json([
                 'status'  => 'success',
                 'message' => 'Home banner deleted successfully',
@@ -179,11 +275,14 @@ class HomeBanner extends Controller
         try {
             $banner = home_banner::findOrFail($id);
             $path = $type === 'web' ? $banner->web_banner_path : $banner->mobile_banner_path;
+
             if (!$path || !Storage::disk('s3')->exists($path)) {
                 return response()->json(['status' => 'error', 'message' => 'File not found.'], 404);
             }
+
             $fileContents = Storage::disk('s3')->get($path);
             $fileName = $banner->title . '-' . $type . '.' . pathinfo($path, PATHINFO_EXTENSION);
+
             return response($fileContents, 200)
                 ->header('Content-Type', Storage::disk('s3')->mimeType($path))
                 ->header('Content-Disposition', 'attachment; filename="' . $fileName . '"');

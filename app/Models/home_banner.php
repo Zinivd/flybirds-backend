@@ -1,5 +1,7 @@
 <?php
+
 namespace App\Models;
+
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Storage;
@@ -16,10 +18,14 @@ class home_banner extends Model
         'mobile_banner_path',
         'order_level',
         'status',
+        'published',
+        'active',
     ];
 
     protected $casts = [
         'status'      => 'boolean',
+        'published'   => 'boolean',
+        'active'      => 'boolean',
         'order_level' => 'integer',
     ];
 
@@ -55,7 +61,12 @@ class home_banner extends Model
 
     public function scopeActive($query)
     {
-        return $query->where('status', true);
+        return $query->where('status', true)->where('active', true);
+    }
+
+    public function scopePublished($query)
+    {
+        return $query->where('published', true);
     }
 
     public function scopeOrdered($query)
