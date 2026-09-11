@@ -15,10 +15,14 @@ use Exception;
 class InventoryController extends Controller
 {
     // 1. GET: List all stocks (with pagination and variant details)
+    // Excludes stock rows belonging to INACTIVE (soft-deleted) products.
     public function index()
     {
         try {
             $stocks = ProductSizeStock::with(['colorVariant.product', 'colorVariant.color'])
+                ->whereHas('colorVariant.product', function ($query) {
+                    $query->where('is_active', true);   // ← added
+                })
                 ->latest()
                 ->paginate(20);
             return response()->json(['status' => 'success', 'data' => $stocks], 200);
@@ -29,11 +33,15 @@ class InventoryController extends Controller
     }
 
     // 2. GET: Stock by Product ID
+    // Returns nothing if the product itself is inactive.
     public function getByProduct($productId)
     {
         try {
             $stocks = ProductSizeStock::whereHas('colorVariant', function ($query) use ($productId) {
-                $query->where('product_id', $productId);
+                $query->where('product_id', $productId)
+                    ->whereHas('product', function ($q) {
+                        $q->where('is_active', true);   // ← added
+                    });
             })->with(['colorVariant.color'])->get();
 
             if ($stocks->isEmpty()) {
@@ -46,11 +54,15 @@ class InventoryController extends Controller
     }
 
     // 3. GET: Stock by Size
+    // Excludes stock rows belonging to INACTIVE products.
     public function getBySize($size)
     {
         try {
             $stocks = ProductSizeStock::where('size', $size)
                 ->with(['colorVariant.product', 'colorVariant.color'])
+                ->whereHas('colorVariant.product', function ($query) {
+                    $query->where('is_active', true);   // ← added
+                })
                 ->get();
             return response()->json(['status' => 'success', 'data' => $stocks], 200);
         } catch (Exception $e) {
@@ -59,6 +71,11 @@ class InventoryController extends Controller
     }
 
     // 4. POST: Update stock (with Audit Log and Concurrency Safety)
+    // Left unchanged — adjusting stock on an inactive product is a
+    // legitimate admin action (e.g. correcting counts before
+    // reactivating), so this endpoint intentionally does NOT block
+    // on is_active. Only the *listing* endpoints above hide inactive
+    // products from view.
     public function updateStockByProduct(Request $request, $productId)
     {
         try {

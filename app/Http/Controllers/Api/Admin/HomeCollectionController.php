@@ -59,6 +59,7 @@ class HomeCollectionController extends Controller
         try {
             $rows = DB::table('order_items')
                 ->join('products', 'products.id', '=', 'order_items.product_id')
+                ->where('products.is_active', true)   // ← added
                 ->select(
                     'products.category_id',
                     DB::raw('SUM(order_items.quantity) as total_sold'),
@@ -89,6 +90,7 @@ class HomeCollectionController extends Controller
                 ->join('products', 'products.id', '=', 'order_items.product_id')
                 ->whereIn('products.category_id', $categoryIds)
                 ->where('products.is_published', true)
+                ->where('products.is_active', true)   // ← added
                 ->select(
                     'order_items.product_id',
                     DB::raw('SUM(order_items.quantity) as total_sold')
@@ -119,6 +121,7 @@ class HomeCollectionController extends Controller
             return DB::table('order_items')
                 ->join('products', 'products.id', '=', 'order_items.product_id')
                 ->where('products.is_published', true)
+                ->where('products.is_active', true)   // ← added
                 ->select(
                     'order_items.product_id',
                     DB::raw('SUM(order_items.quantity) as total_sold')
@@ -132,7 +135,6 @@ class HomeCollectionController extends Controller
             return null;
         }
     }
-
     // ═══════════════════════════════════════════════════════════════
     // PRIVATE HELPER: Safely fetch the best-selling COLOR VARIANTS
     // for a single product, ranked by total units sold. Used by
@@ -248,6 +250,9 @@ class HomeCollectionController extends Controller
     // added products, taking the first 2 color variants of each
     // (still 4 objects total, each flagged is_fallback: true).
     // ═══════════════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════════════════
+    // GET /admin/home/best-collections
+    // ═══════════════════════════════════════════════════════════════
     public function bestCollections(Request $request)
     {
         try {
@@ -268,7 +273,12 @@ class HomeCollectionController extends Controller
             if ($bestProducts && $bestProducts->isNotEmpty()) {
                 $result = collect();
                 foreach ($bestProducts as $row) {
-                    $product = Product::with($withRelations)->find($row->product_id);
+                    // is_active check kept here too as a second guard,
+                    // in case a product was deactivated after the sales
+                    // aggregation above was computed.
+                    $product = Product::with($withRelations)
+                        ->where('is_active', true)   // ← added
+                        ->find($row->product_id);
                     if (!$product) {
                         continue;
                     }
@@ -287,8 +297,12 @@ class HomeCollectionController extends Controller
                 }
             }
 
-            // Case 2: No sales data yet — fall back to latest added products
-            $fallbackProducts = Product::with($withRelations)->latest()->limit($productLimit)->get();
+            // Case 2: No sales data yet — fall back to latest added ACTIVE products
+            $fallbackProducts = Product::with($withRelations)
+                ->where('is_active', true)   // ← added
+                ->latest()
+                ->limit($productLimit)
+                ->get();
             $result = collect();
             foreach ($fallbackProducts as $product) {
                 $entries = $this->buildProductColorEntries($product, null, $colorLimit, 0, true);
@@ -311,11 +325,6 @@ class HomeCollectionController extends Controller
 
     // ═══════════════════════════════════════════════════════════════
     // GET /admin/home/best-sellers?user_id=5
-    //
-    // Pulls from the top 3 categories by sales, then returns the
-    // top 8 products (by sales) within those categories. Falls back
-    // to the 8 most recently added published products if no sales
-    // data exists yet.
     // ═══════════════════════════════════════════════════════════════
     public function bestSellers(Request $request)
     {
@@ -340,6 +349,7 @@ class HomeCollectionController extends Controller
                         'colorVariants.sizeStocks',
                     ])
                         ->whereIn('id', $productIds)
+                        ->where('is_active', true)   // ← added
                         ->get();
                     $ordered = $products->sortBy(function ($product) use ($productIds) {
                         return array_search($product->id, $productIds);
@@ -355,7 +365,7 @@ class HomeCollectionController extends Controller
                     }
                 }
             }
-            // Case 2: No sales data yet — fall back to latest added published products
+            // Case 2: No sales data yet — fall back to latest added, ACTIVE, published products
             $fallbackProducts = Product::with([
                 'category',
                 'colorVariants.familyColor',
@@ -365,6 +375,7 @@ class HomeCollectionController extends Controller
                 'colorVariants.sizeStocks',
             ])
                 ->where('is_published', true)
+                ->where('is_active', true)   // ← added
                 ->latest()
                 ->limit($productLimit)
                 ->get();
