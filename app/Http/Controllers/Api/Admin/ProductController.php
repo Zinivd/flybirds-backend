@@ -1,5 +1,7 @@
 <?php
+
 namespace App\Http\Controllers\Api\Admin;
+
 use App\Http\Controllers\Controller;
 use App\Models\Product;
 use App\Models\ProductColorVariant;
@@ -14,6 +16,7 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Validation\ValidationException;
 use Exception;
+
 class ProductController extends Controller
 {
     // ═══════════════════════════════════════════════════════════════
@@ -251,11 +254,11 @@ class ProductController extends Controller
                 'colorVariants.thumbnailImage',
                 'colorVariants.sizeStocks',
             ])
-            ->where('category_id', $categoryId)
-            ->where('is_published', true)
-            ->where('is_active', true)
-            ->latest()
-            ->paginate(15);
+                ->where('category_id', $categoryId)
+                ->where('is_published', true)
+                ->where('is_active', true)
+                ->latest()
+                ->paginate(15);
             $userId = $request->query('user_id');
             $this->attachWishlistFlagToCollection($products, $userId);
             return response()->json(['status' => 'success', 'data' => $products], 200);
@@ -278,13 +281,13 @@ class ProductController extends Controller
                 'colorVariants.galleryImages',
                 'colorVariants.sizeStocks',
             ])
-            ->where('category_id', $product->category_id)
-            ->where('id', '!=', $id)
-            ->where('is_published', true)
-            ->where('is_active', true)
-            ->latest()
-            ->limit(10)
-            ->get();
+                ->where('category_id', $product->category_id)
+                ->where('id', '!=', $id)
+                ->where('is_published', true)
+                ->where('is_active', true)
+                ->latest()
+                ->limit(10)
+                ->get();
             $userId = $request->query('user_id');
             $this->attachWishlistFlagToCollection($similar, $userId);
             return response()->json(['status' => 'success', 'data' => $similar], 200);
@@ -334,9 +337,9 @@ class ProductController extends Controller
                 // Colors — now driven by family color / family color child
                 'colors'                        => 'required|array|min:1',
                 'colors.*.family_color_id'      => 'required|exists:family_colors,id',
-                'colors.*.family_color_child_id'=> 'nullable|exists:family_color_children,id',
+                'colors.*.family_color_child_id' => 'nullable|exists:family_color_children,id',
                 'colors.*.gallery_image_ids'    => 'nullable|array|max:6',
-'colors.*.gallery_image_ids.*'  => 'integer|exists:media,id',
+                'colors.*.gallery_image_ids.*'  => 'integer|exists:media,id',
                 'colors.*.thumbnail_image_id'   => 'nullable|integer|exists:media,id',
                 'colors.*.sizes'                => 'required|array|min:1',
                 'colors.*.sizes.*.size'         => 'required|string|max:50',
@@ -446,6 +449,15 @@ class ProductController extends Controller
     }
     // ═══════════════════════════════════════════════════════════════
     // POST /admin/products/{id}  — Update product
+    //
+    // Behavior contract:
+    //   - Any color/size NOT included in the request payload is left
+    //     completely untouched in the database (nothing is deleted).
+    //   - Any color/size INCLUDED in the payload is matched to its
+    //     existing row (by id first, then by natural key as a
+    //     fallback) and UPDATED in place — never re-created.
+    //   - A color/size that has no matching existing row is treated
+    //     as brand new and inserted.
     // ═══════════════════════════════════════════════════════════════
     public function update(Request $request, $id)
     {
@@ -488,7 +500,7 @@ class ProductController extends Controller
                 'colors.*.family_color_id'          => 'required_with:colors|exists:family_colors,id',
                 'colors.*.family_color_child_id'    => 'nullable|exists:family_color_children,id',
                 'colors.*.gallery_image_ids'        => 'nullable|array|max:6',
-'colors.*.gallery_image_ids.*'      => 'integer|exists:media,id',
+                'colors.*.gallery_image_ids.*'      => 'integer|exists:media,id',
                 'colors.*.thumbnail_image_id'       => 'nullable|integer|exists:media,id',
                 'colors.*.sizes'                    => 'sometimes|array|min:1',
                 'colors.*.sizes.*.size_stock_id'    => 'nullable|exists:product_size_stocks,id',
@@ -506,6 +518,10 @@ class ProductController extends Controller
         }
         DB::beginTransaction();
         try {
+            // ── Top-level product fields ──
+            // array_filter over $validated means only keys actually
+            // present in the request are touched; anything the client
+            // didn't send stays exactly as it was in the DB.
             $productUpdateData = array_filter(
                 $validated,
                 fn($k) => !in_array($k, ['colors', 'spotlight_image_id']),
@@ -520,20 +536,47 @@ class ProductController extends Controller
                 }
             }
             $product->update($productUpdateData);
+
+            // ── Colors ──
+            // Only colors present in the request are processed at all.
+            // Existing colors NOT in the payload are left exactly as-is.
             if (!empty($validated['colors'])) {
                 foreach ($validated['colors'] as $colorData) {
                     $this->assertChildBelongsToFamily(
                         $colorData['family_color_id'],
                         $colorData['family_color_child_id'] ?? null
                     );
+
+                    // Resolve the target color variant:
+                    //   1) explicit color_variant_id (preferred, exact match)
+                    //   2) fallback — match an existing variant on this
+                    //      product by family_color_id + family_color_child_id,
+                    //      so a payload missing the id still updates the
+                    //      right row instead of creating a duplicate.
+                    $colorVariant = null;
                     if (!empty($colorData['color_variant_id'])) {
                         $colorVariant = ProductColorVariant::where('id', $colorData['color_variant_id'])
                             ->where('product_id', $product->id)
                             ->firstOrFail();
+                    } else {
+                        $colorVariant = ProductColorVariant::where('product_id', $product->id)
+                            ->where('family_color_id', $colorData['family_color_id'])
+                            ->where('family_color_child_id', $colorData['family_color_child_id'] ?? null)
+                            ->first();
+                    }
+
+                    if ($colorVariant) {
+                        // ═══════════════════════════════════════
+                        // EXISTING COLOR — update in place
+                        // ═══════════════════════════════════════
                         $colorVariant->update([
                             'family_color_id'       => $colorData['family_color_id'],
                             'family_color_child_id' => $colorData['family_color_child_id'] ?? null,
                         ]);
+
+                        // Gallery images: only touched if the key was sent.
+                        // If the client didn't send gallery_image_ids for
+                        // this color, the existing gallery stays untouched.
                         if (array_key_exists('gallery_image_ids', $colorData)) {
                             $colorVariant->galleryImages()->delete();
                             foreach (($colorData['gallery_image_ids'] ?? []) as $sortOrder => $mediaId) {
@@ -548,6 +591,8 @@ class ProductController extends Controller
                                 }
                             }
                         }
+
+                        // Thumbnail: same rule — only touched if key was sent.
                         if (array_key_exists('thumbnail_image_id', $colorData)) {
                             $colorVariant->thumbnailImage()->delete();
                             if (!empty($colorData['thumbnail_image_id'])) {
@@ -562,12 +607,31 @@ class ProductController extends Controller
                                 }
                             }
                         }
+
+                        // Sizes: only sizes included in the payload are
+                        // touched. Any existing size not mentioned here
+                        // is left exactly as it was (not deleted).
                         if (!empty($colorData['sizes'])) {
                             foreach ($colorData['sizes'] as $sizeData) {
+                                // Resolve the target size row:
+                                //   1) explicit size_stock_id (preferred)
+                                //   2) fallback — match by SKU within this
+                                //      variant, so a payload missing the id
+                                //      still updates the right row instead
+                                //      of colliding on a unique SKU insert.
+                                $sizeStock = null;
                                 if (!empty($sizeData['size_stock_id'])) {
                                     $sizeStock = ProductSizeStock::where('id', $sizeData['size_stock_id'])
                                         ->where('product_color_variant_id', $colorVariant->id)
                                         ->firstOrFail();
+                                } else {
+                                    $sizeStock = ProductSizeStock::where('product_color_variant_id', $colorVariant->id)
+                                        ->where('sku', $sizeData['sku'])
+                                        ->first();
+                                }
+
+                                if ($sizeStock) {
+                                    // Existing size → update in place.
                                     $skuTaken = ProductSizeStock::where('sku', $sizeData['sku'])
                                         ->where('id', '!=', $sizeStock->id)
                                         ->exists();
@@ -581,6 +645,7 @@ class ProductController extends Controller
                                         'stock' => $sizeData['stock'],
                                     ]);
                                 } else {
+                                    // No matching existing size → genuinely new size for this color.
                                     $skuTaken = ProductSizeStock::where('sku', $sizeData['sku'])->exists();
                                     if ($skuTaken) {
                                         throw new Exception("SKU '{$sizeData['sku']}' already exists.");
@@ -596,6 +661,11 @@ class ProductController extends Controller
                             }
                         }
                     } else {
+                        // ═══════════════════════════════════════
+                        // NEW COLOR — no color_variant_id given and
+                        // no existing variant matched this color, so
+                        // this is a color being added in the edit.
+                        // ═══════════════════════════════════════
                         $colorVariant = ProductColorVariant::create([
                             'product_id'             => $product->id,
                             'family_color_id'        => $colorData['family_color_id'],
@@ -639,6 +709,7 @@ class ProductController extends Controller
                     }
                 }
             }
+
             DB::commit();
             return response()->json([
                 'status'  => 'success',
