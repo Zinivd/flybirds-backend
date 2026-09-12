@@ -447,7 +447,7 @@ class ProductController extends Controller
             return response()->json(['status' => 'error', 'message' => $e->getMessage() ?: 'Failed to create product.'], 500);
         }
     }
-    // ═══════════════════════════════════════════════════════════════
+        // ═══════════════════════════════════════════════════════════════
     // POST /admin/products/{id}  — Update product
     //
     // Behavior contract:
@@ -458,11 +458,8 @@ class ProductController extends Controller
     //     fallback) and UPDATED in place — never re-created.
     //   - A color/size that has no matching existing row is treated
     //     as brand new and inserted.
-    //   - SKU swaps/renames across multiple rows IN THE SAME REQUEST
-    //     are supported: uniqueness is checked against the whole
-    //     batch of rows being touched, not just "this row vs. the
-    //     live DB", so reassigning a SKU that another row in this
-    //     same payload is simultaneously vacating won't false-positive.
+    //   - NOTE: SKU uniqueness is NOT enforced here anymore. Duplicate
+    //     SKUs across rows are allowed to be written.
     // ═══════════════════════════════════════════════════════════════
     public function update(Request $request, $id)
     {
@@ -539,18 +536,8 @@ class ProductController extends Controller
             }
             $product->update($productUpdateData);
 
+            // ── Colors ──
             if (!empty($validated['colors'])) {
-
-                // ═══════════════════════════════════════════════
-                // PASS 1 — Resolve every color variant + size row
-                // that this request touches, BEFORE writing anything.
-                // This lets us know the full set of "rows being
-                // edited in this batch" so SKU-swaps between them
-                // don't falsely collide with each other.
-                // ═══════════════════════════════════════════════
-                $resolvedColors = []; // list of ['colorVariant' => model|null, 'colorData' => array, 'sizes' => [['sizeStock' => model|null, 'sizeData' => array], ...]]
-                $touchedSizeStockIds = [];
-
                 foreach ($validated['colors'] as $colorData) {
                     $this->assertChildBelongsToFamily(
                         $colorData['family_color_id'],
@@ -568,46 +555,6 @@ class ProductController extends Controller
                             ->where('family_color_child_id', $colorData['family_color_child_id'] ?? null)
                             ->first();
                     }
-
-                    $resolvedSizes = [];
-                    if ($colorVariant && !empty($colorData['sizes'])) {
-                        foreach ($colorData['sizes'] as $sizeData) {
-                            $sizeStock = null;
-                            if (!empty($sizeData['size_stock_id'])) {
-                                $sizeStock = ProductSizeStock::where('id', $sizeData['size_stock_id'])
-                                    ->where('product_color_variant_id', $colorVariant->id)
-                                    ->firstOrFail();
-                            } else {
-                                // Match by the stable SIZE LABEL, not sku —
-                                // sku is exactly the field that may be changing.
-                                $sizeStock = ProductSizeStock::where('product_color_variant_id', $colorVariant->id)
-                                    ->where('size', $sizeData['size'])
-                                    ->first();
-                            }
-                            if ($sizeStock) {
-                                $touchedSizeStockIds[] = $sizeStock->id;
-                            }
-                            $resolvedSizes[] = ['sizeStock' => $sizeStock, 'sizeData' => $sizeData];
-                        }
-                    }
-
-                    $resolvedColors[] = [
-                        'colorVariant' => $colorVariant,
-                        'colorData'    => $colorData,
-                        'sizes'        => $resolvedSizes,
-                    ];
-                }
-
-                // ═══════════════════════════════════════════════
-                // PASS 2 — Actually apply the changes. SKU
-                // uniqueness is checked against the DB excluding
-                // every row already resolved in Pass 1 above, so
-                // a SKU being vacated by row A in this same
-                // request can be freely claimed by row B.
-                // ═══════════════════════════════════════════════
-                foreach ($resolvedColors as $resolved) {
-                    $colorData    = $resolved['colorData'];
-                    $colorVariant = $resolved['colorVariant'];
 
                     if ($colorVariant) {
                         // ═══════════════════════════════════════
@@ -648,43 +595,47 @@ class ProductController extends Controller
                             }
                         }
 
-                        foreach ($resolved['sizes'] as $sizeEntry) {
-                            $sizeData  = $sizeEntry['sizeData'];
-                            $sizeStock = $sizeEntry['sizeStock'];
+                        // Sizes: only sizes included in the payload are
+                        // touched. Any existing size not mentioned here
+                        // is left exactly as it was (not deleted).
+                        if (!empty($colorData['sizes'])) {
+                            foreach ($colorData['sizes'] as $sizeData) {
+                                // Resolve the target size row:
+                                //   1) explicit size_stock_id (preferred)
+                                //   2) fallback — match by SIZE LABEL
+                                //      within this variant (not sku,
+                                //      since sku may be exactly what's
+                                //      being changed).
+                                $sizeStock = null;
+                                if (!empty($sizeData['size_stock_id'])) {
+                                    $sizeStock = ProductSizeStock::where('id', $sizeData['size_stock_id'])
+                                        ->where('product_color_variant_id', $colorVariant->id)
+                                        ->firstOrFail();
+                                } else {
+                                    $sizeStock = ProductSizeStock::where('product_color_variant_id', $colorVariant->id)
+                                        ->where('size', $sizeData['size'])
+                                        ->first();
+                                }
 
-                            if ($sizeStock) {
-                                // Existing size → update in place, including a
-                                // changed SKU. Exclude every row touched by
-                                // THIS WHOLE REQUEST (not just this one row)
-                                // so cross-color SKU swaps/renames don't
-                                // falsely collide with each other.
-                                $skuTaken = ProductSizeStock::where('sku', $sizeData['sku'])
-                                    ->whereNotIn('id', $touchedSizeStockIds)
-                                    ->exists();
-                                if ($skuTaken) {
-                                    throw new Exception("SKU '{$sizeData['sku']}' already exists.");
+                                if ($sizeStock) {
+                                    // Existing size → update in place. No SKU
+                                    // uniqueness check.
+                                    $sizeStock->update([
+                                        'size'  => $sizeData['size'],
+                                        'sku'   => $sizeData['sku'],
+                                        'price' => $sizeData['price'],
+                                        'stock' => $sizeData['stock'],
+                                    ]);
+                                } else {
+                                    // No matching existing size → genuinely new size for this color.
+                                    ProductSizeStock::create([
+                                        'product_color_variant_id' => $colorVariant->id,
+                                        'size'  => $sizeData['size'],
+                                        'sku'   => $sizeData['sku'],
+                                        'price' => $sizeData['price'],
+                                        'stock' => $sizeData['stock'],
+                                    ]);
                                 }
-                                $sizeStock->update([
-                                    'size'  => $sizeData['size'],
-                                    'sku'   => $sizeData['sku'],
-                                    'price' => $sizeData['price'],
-                                    'stock' => $sizeData['stock'],
-                                ]);
-                            } else {
-                                // Genuinely new size for this color.
-                                $skuTaken = ProductSizeStock::where('sku', $sizeData['sku'])
-                                    ->whereNotIn('id', $touchedSizeStockIds)
-                                    ->exists();
-                                if ($skuTaken) {
-                                    throw new Exception("SKU '{$sizeData['sku']}' already exists.");
-                                }
-                                ProductSizeStock::create([
-                                    'product_color_variant_id' => $colorVariant->id,
-                                    'size'  => $sizeData['size'],
-                                    'sku'   => $sizeData['sku'],
-                                    'price' => $sizeData['price'],
-                                    'stock' => $sizeData['stock'],
-                                ]);
                             }
                         }
                     } else {
@@ -719,12 +670,6 @@ class ProductController extends Controller
                             }
                         }
                         foreach (($colorData['sizes'] ?? []) as $sizeData) {
-                            $skuTaken = ProductSizeStock::where('sku', $sizeData['sku'])
-                                ->whereNotIn('id', $touchedSizeStockIds)
-                                ->exists();
-                            if ($skuTaken) {
-                                throw new Exception("SKU '{$sizeData['sku']}' already exists.");
-                            }
                             ProductSizeStock::create([
                                 'product_color_variant_id' => $colorVariant->id,
                                 'size'  => $sizeData['size'],
