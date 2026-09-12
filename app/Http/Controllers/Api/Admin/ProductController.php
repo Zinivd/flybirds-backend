@@ -447,7 +447,7 @@ class ProductController extends Controller
             return response()->json(['status' => 'error', 'message' => $e->getMessage() ?: 'Failed to create product.'], 500);
         }
     }
-    // ═══════════════════════════════════════════════════════════════
+        // ═══════════════════════════════════════════════════════════════
     // POST /admin/products/{id}  — Update product
     //
     // Behavior contract:
@@ -458,6 +458,11 @@ class ProductController extends Controller
     //     fallback) and UPDATED in place — never re-created.
     //   - A color/size that has no matching existing row is treated
     //     as brand new and inserted.
+    //   - Editing a size's SKU is fully supported: the row is
+    //     resolved by size_stock_id (preferred) or by the stable
+    //     `size` label within the color variant (fallback) — NOT by
+    //     the (mutable) sku value itself, so renaming a SKU updates
+    //     the existing row instead of creating a duplicate.
     // ═══════════════════════════════════════════════════════════════
     public function update(Request $request, $id)
     {
@@ -577,6 +582,9 @@ class ProductController extends Controller
                         // Gallery images: only touched if the key was sent.
                         // If the client didn't send gallery_image_ids for
                         // this color, the existing gallery stays untouched.
+                        // If it WAS sent, we wipe the old gallery rows and
+                        // recreate from the new list of media ids — this is
+                        // how "remove old images, add new images" works.
                         if (array_key_exists('gallery_image_ids', $colorData)) {
                             $colorVariant->galleryImages()->delete();
                             foreach (($colorData['gallery_image_ids'] ?? []) as $sortOrder => $mediaId) {
@@ -614,11 +622,13 @@ class ProductController extends Controller
                         if (!empty($colorData['sizes'])) {
                             foreach ($colorData['sizes'] as $sizeData) {
                                 // Resolve the target size row:
-                                //   1) explicit size_stock_id (preferred)
-                                //   2) fallback — match by SKU within this
-                                //      variant, so a payload missing the id
-                                //      still updates the right row instead
-                                //      of colliding on a unique SKU insert.
+                                //   1) explicit size_stock_id (preferred, exact match)
+                                //   2) fallback — match by the SIZE LABEL
+                                //      (e.g. "M", "L") within this variant,
+                                //      NOT by sku. The sku is exactly the
+                                //      field you may be changing, so
+                                //      matching on it would never find the
+                                //      row you're trying to rename.
                                 $sizeStock = null;
                                 if (!empty($sizeData['size_stock_id'])) {
                                     $sizeStock = ProductSizeStock::where('id', $sizeData['size_stock_id'])
@@ -626,12 +636,14 @@ class ProductController extends Controller
                                         ->firstOrFail();
                                 } else {
                                     $sizeStock = ProductSizeStock::where('product_color_variant_id', $colorVariant->id)
-                                        ->where('sku', $sizeData['sku'])
+                                        ->where('size', $sizeData['size'])
                                         ->first();
                                 }
 
                                 if ($sizeStock) {
-                                    // Existing size → update in place.
+                                    // Existing size → update in place, including
+                                    // a changed SKU. Just make sure the new SKU
+                                    // isn't already used by a *different* row.
                                     $skuTaken = ProductSizeStock::where('sku', $sizeData['sku'])
                                         ->where('id', '!=', $sizeStock->id)
                                         ->exists();
