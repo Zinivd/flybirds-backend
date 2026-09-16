@@ -28,8 +28,11 @@ class OrderController extends Controller
     private const DELIVERY_STATUSES = ['Packed', 'Shipped', 'Out For Delivery', 'Delivered', 'RTO', 'Cancelled', 'Refunded'];
     private const PAYMENT_STATUSES = ['Pending', 'Paid', 'Failed', 'Refunded'];
     private const NON_CANCELLABLE_STATUSES = ['Delivered', 'Cancelled', 'Refunded'];
-    // Product prices are GST-inclusive, so GST is never added on top here.
-    private const GST_RATE = 0.18;
+    // ─────────────────────────────────────────────────────────────
+    // TAX DISABLED: GST is no longer calculated or added anywhere.
+    // `tax` is always persisted as 0.0 and never included in the
+    // `amount` sum. GST_RATE is intentionally NOT defined/used.
+    // ─────────────────────────────────────────────────────────────
     // Fallback flat shipping charge, used only if Delhivery's live quote
     // can't be resolved (no pincode, or the carrier API is down).
     private const FALLBACK_SHIPPING_CHARGE = 49.0;
@@ -488,13 +491,16 @@ class OrderController extends Controller
             $discount = round($productDiscount + $couponDiscount, 2);
             // Spec #4: taxable amount = subtotal - discount
             $taxableAmount = round($subtotal - $discount, 2);
-            // Spec #5: tax is FRESH, additive — NOT reverse-extracted from an inclusive price.
-            $tax = round($taxableAmount * self::GST_RATE, 2);
+            // ─────────────────────────────────────────────────────────
+            // TAX DISABLED: tax is no longer calculated. Always 0, and
+            // never added into `amount`.
+            // ─────────────────────────────────────────────────────────
+            $tax = 0.0;
             // Placeholder shipping — replaced with a live Delhivery quote
             // once the Order + its items actually exist below (the quote
             // needs the order's weight/pincode/payment method).
             $shippingCharge = self::FALLBACK_SHIPPING_CHARGE;
-            $amount = round($taxableAmount + $tax + $shippingCharge, 2);
+            $amount = round($taxableAmount + $shippingCharge, 2);
             if (round($taxableAmount, 2) < 0) {
                 DB::rollBack();
                 return response()->json(['status' => 'error', 'message' => 'Discount cannot exceed order subtotal.'], 422);
@@ -548,11 +554,12 @@ class OrderController extends Controller
             }
             // Now that items are persisted, get the real, live shipping
             // quote for the chosen payment method and correct the order's
-            // shipping/amount before it's committed.
+            // shipping/amount before it's committed. Tax stays 0 and is
+            // never re-added here.
             $order->refresh();
             $liveShippingCharge = $this->resolveShippingCharge($order, $taxableAmount, $validated['payment_method']);
             if ($liveShippingCharge !== $shippingCharge) {
-                $amount = round($taxableAmount + $tax + $liveShippingCharge, 2);
+                $amount = round($taxableAmount + $liveShippingCharge, 2);
                 $order->shipping = $liveShippingCharge;
                 $order->amount = $amount;
                 $order->save();
@@ -599,7 +606,7 @@ class OrderController extends Controller
     // Frontend calls THIS to preview shipping when the customer switches
     // payment method — never calls Delhivery directly. Persists the
     // result on the order so confirmCod()/verifyPayment() charge exactly
-    // what was quoted here.
+    // what was quoted here. Tax is always 0 and never included.
     // ═══════════════════════════════════════════════════════════════
     public function shippingQuote(Request $request, $id)
     {
@@ -614,8 +621,8 @@ class OrderController extends Controller
         try {
             $taxableAmount = round((float) $order->subtotal - (float) $order->discount, 2);
             $shippingCharge = $this->resolveShippingCharge($order, $taxableAmount, $validated['payment_method']);
-            $tax = round($taxableAmount * self::GST_RATE, 2);
-            $amount = round($taxableAmount + $tax + $shippingCharge, 2);
+            $tax = 0.0;
+            $amount = round($taxableAmount + $shippingCharge, 2);
             $order->shipping = $shippingCharge;
             $order->tax = $tax;
             $order->amount = $amount;
@@ -643,9 +650,8 @@ class OrderController extends Controller
     // Delivery instead of Razorpay. The amount/shipping figures are NOT
     // taken from the request body — they're recomputed here from a live
     // Delhivery quote using the order's already-frozen subtotal/discount,
-    // via the same resolveShippingCharge() used everywhere else. This
-    // guarantees the stored order total is always internally consistent,
-    // and a tampered request body can't change what's charged.
+    // via the same resolveShippingCharge() used everywhere else. Tax is
+    // always 0 and never included in the recomputed amount.
     // ═══════════════════════════════════════════════════════════════
     public function confirmCod(Request $request, $id)
     {
@@ -669,8 +675,8 @@ class OrderController extends Controller
         try {
             $taxableAmount = round((float) $order->subtotal - (float) $order->discount, 2);
             $shippingCharge = $this->resolveShippingCharge($order, $taxableAmount, 'cod');
-            $tax = round($taxableAmount * self::GST_RATE, 2);
-            $amount = round($taxableAmount + $tax + $shippingCharge, 2);
+            $tax = 0.0;
+            $amount = round($taxableAmount + $shippingCharge, 2);
             $order->payment_method = 'cod';
             $order->payment_status = 'Pending'; // collected on delivery, marked Paid later via updateStatus()
             $order->shipping = $shippingCharge;
@@ -833,7 +839,7 @@ class OrderController extends Controller
             'subtotal' => (float) $order->subtotal,
             'discount' => (float) $order->discount,
             'shipping_charge' => (float) $order->shipping,
-            'tax' => (float) $order->tax,
+            'tax' => (float) $order->tax, // always 0 now — tax disabled
             'total' => (float) $order->amount,
         ];
     }
