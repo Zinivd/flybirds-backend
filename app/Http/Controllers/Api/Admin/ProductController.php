@@ -107,6 +107,28 @@ class ProductController extends Controller
         }
     }
     // ═══════════════════════════════════════════════════════════════
+    // PRIVATE HELPER (NEW): guard against two size_stock rows ending up
+    // with the same size within the same color variant. This is what
+    // was missing — without it, an update() can silently try to write
+    // a size that another row in the same variant already has, and
+    // MySQL rejects it with a raw "Duplicate entry ... for key
+    // product_size_stocks_product_color_variant_id_size_unique" error.
+    //
+    //   $excludeId — the id of the row currently being updated, so it
+    //                doesn't conflict with itself.
+    // ═══════════════════════════════════════════════════════════════
+    private function assertSizeUniqueInVariant(int $colorVariantId, string $size, ?int $excludeId = null): void
+    {
+        $query = ProductSizeStock::where('product_color_variant_id', $colorVariantId)
+            ->where('size', $size);
+        if ($excludeId) {
+            $query->where('id', '!=', $excludeId);
+        }
+        if ($query->exists()) {
+            throw new Exception("The size \"{$size}\" already exists for this color. Each color can only have one row per size — edit the existing row instead of creating a duplicate.");
+        }
+    }
+    // ═══════════════════════════════════════════════════════════════
     // GET /admin/products
     // Query params supported:
     //   ?is_published=1 ?is_today_sale=1 ?is_flash_sale=1 ?search=polo ?user_id=5
@@ -425,7 +447,14 @@ class ProductController extends Controller
                         ]);
                     }
                 }
+                // Guard against two sizes with the same label being sent
+                // for the same color in a single create request.
+                $seenSizes = [];
                 foreach ($colorData['sizes'] as $sizeData) {
+                    if (in_array($sizeData['size'], $seenSizes, true)) {
+                        throw new Exception("Duplicate size \"{$sizeData['size']}\" submitted twice for the same color.");
+                    }
+                    $seenSizes[] = $sizeData['size'];
                     ProductSizeStock::create([
                         'product_color_variant_id' => $colorVariant->id,
                         'size'                     => $sizeData['size'],
@@ -460,6 +489,13 @@ class ProductController extends Controller
     //     as brand new and inserted.
     //   - NOTE: SKU uniqueness is NOT enforced here anymore. Duplicate
     //     SKUs across rows are allowed to be written.
+    //   - FIX: size UNIQUENESS per color variant IS still enforced,
+    //     because the DB has a unique constraint on
+    //     (product_color_variant_id, size). Before writing a size
+    //     value (update or insert), we now check no other row in the
+    //     same color variant already has that size — otherwise we
+    //     throw a clear error instead of letting MySQL fail with a
+    //     raw SQLSTATE 23000 duplicate-entry error.
     // ═══════════════════════════════════════════════════════════════
     public function update(Request $request, $id)
     {
@@ -618,6 +654,18 @@ class ProductController extends Controller
                                 }
 
                                 if ($sizeStock) {
+                                    // FIX: before writing the (possibly changed)
+                                    // size label, make sure no *other* row in
+                                    // this same color variant already owns
+                                    // that size label. This is exactly what
+                                    // was missing and caused the
+                                    // "Duplicate entry '36-2XL'" SQL error.
+                                    $this->assertSizeUniqueInVariant(
+                                        $colorVariant->id,
+                                        $sizeData['size'],
+                                        $sizeStock->id
+                                    );
+
                                     // Existing size → update in place. No SKU
                                     // uniqueness check.
                                     $sizeStock->update([
@@ -627,6 +675,16 @@ class ProductController extends Controller
                                         'stock' => $sizeData['stock'],
                                     ]);
                                 } else {
+                                    // FIX: also guard the "new size" insert
+                                    // path — a genuinely new row could still
+                                    // collide with an existing size label
+                                    // that wasn't matched above (e.g. size
+                                    // casing/whitespace differences).
+                                    $this->assertSizeUniqueInVariant(
+                                        $colorVariant->id,
+                                        $sizeData['size']
+                                    );
+
                                     // No matching existing size → genuinely new size for this color.
                                     ProductSizeStock::create([
                                         'product_color_variant_id' => $colorVariant->id,
@@ -669,7 +727,13 @@ class ProductController extends Controller
                                 ]);
                             }
                         }
+                        // Guard duplicate sizes within this newly created color too.
+                        $seenSizes = [];
                         foreach (($colorData['sizes'] ?? []) as $sizeData) {
+                            if (in_array($sizeData['size'], $seenSizes, true)) {
+                                throw new Exception("Duplicate size \"{$sizeData['size']}\" submitted twice for the same color.");
+                            }
+                            $seenSizes[] = $sizeData['size'];
                             ProductSizeStock::create([
                                 'product_color_variant_id' => $colorVariant->id,
                                 'size'  => $sizeData['size'],
