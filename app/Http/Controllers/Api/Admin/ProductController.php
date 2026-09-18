@@ -129,6 +129,22 @@ class ProductController extends Controller
         }
     }
     // ═══════════════════════════════════════════════════════════════
+    // PRIVATE HELPER (NEW): find another size_stock row in the same
+    // color variant that already owns the given size label, other
+    // than $excludeId. Used by update() to auto-merge instead of
+    // throwing when a size is being changed to a value that already
+    // exists on a different row in the same color.
+    // ═══════════════════════════════════════════════════════════════
+    private function findConflictingSizeStock(int $colorVariantId, string $size, ?int $excludeId = null): ?ProductSizeStock
+    {
+        $query = ProductSizeStock::where('product_color_variant_id', $colorVariantId)
+            ->where('size', $size);
+        if ($excludeId) {
+            $query->where('id', '!=', $excludeId);
+        }
+        return $query->first();
+    }
+    // ═══════════════════════════════════════════════════════════════
     // GET /admin/products
     // Query params supported:
     //   ?is_published=1 ?is_today_sale=1 ?is_flash_sale=1 ?search=polo ?user_id=5
@@ -655,44 +671,69 @@ class ProductController extends Controller
 
                                 if ($sizeStock) {
                                     // FIX: before writing the (possibly changed)
-                                    // size label, make sure no *other* row in
-                                    // this same color variant already owns
-                                    // that size label. This is exactly what
-                                    // was missing and caused the
-                                    // "Duplicate entry '36-2XL'" SQL error.
-                                    $this->assertSizeUniqueInVariant(
+                                    // size label, check whether *another* row
+                                    // in this same color variant already owns
+                                    // that size label — this is what caused
+                                    // the "Duplicate entry '36-2XL'" SQL error.
+                                    //
+                                    // AUTO-MERGE instead of throwing: if a
+                                    // conflicting row exists, treat this as
+                                    // "fold row A into row B" — the incoming
+                                    // sku/price/stock win, and the row being
+                                    // edited ($sizeStock) is removed so only
+                                    // one row remains for that size.
+                                    $conflict = $this->findConflictingSizeStock(
                                         $colorVariant->id,
                                         $sizeData['size'],
                                         $sizeStock->id
                                     );
 
-                                    // Existing size → update in place. No SKU
-                                    // uniqueness check.
-                                    $sizeStock->update([
-                                        'size'  => $sizeData['size'],
-                                        'sku'   => $sizeData['sku'],
-                                        'price' => $sizeData['price'],
-                                        'stock' => $sizeData['stock'],
-                                    ]);
+                                    if ($conflict) {
+                                        $conflict->update([
+                                            'sku'   => $sizeData['sku'],
+                                            'price' => $sizeData['price'],
+                                            'stock' => $sizeData['stock'],
+                                        ]);
+                                        $sizeStock->delete();
+                                    } else {
+                                        // No conflict → normal in-place update. No SKU
+                                        // uniqueness check.
+                                        $sizeStock->update([
+                                            'size'  => $sizeData['size'],
+                                            'sku'   => $sizeData['sku'],
+                                            'price' => $sizeData['price'],
+                                            'stock' => $sizeData['stock'],
+                                        ]);
+                                    }
                                 } else {
                                     // FIX: also guard the "new size" insert
                                     // path — a genuinely new row could still
                                     // collide with an existing size label
-                                    // that wasn't matched above (e.g. size
-                                    // casing/whitespace differences).
-                                    $this->assertSizeUniqueInVariant(
+                                    // that wasn't matched above. Here there's
+                                    // no "old row" to delete, so we merge the
+                                    // incoming values straight into the
+                                    // existing conflicting row.
+                                    $conflict = $this->findConflictingSizeStock(
                                         $colorVariant->id,
                                         $sizeData['size']
                                     );
 
-                                    // No matching existing size → genuinely new size for this color.
-                                    ProductSizeStock::create([
-                                        'product_color_variant_id' => $colorVariant->id,
-                                        'size'  => $sizeData['size'],
-                                        'sku'   => $sizeData['sku'],
-                                        'price' => $sizeData['price'],
-                                        'stock' => $sizeData['stock'],
-                                    ]);
+                                    if ($conflict) {
+                                        $conflict->update([
+                                            'sku'   => $sizeData['sku'],
+                                            'price' => $sizeData['price'],
+                                            'stock' => $sizeData['stock'],
+                                        ]);
+                                    } else {
+                                        // No matching existing size → genuinely new size for this color.
+                                        ProductSizeStock::create([
+                                            'product_color_variant_id' => $colorVariant->id,
+                                            'size'  => $sizeData['size'],
+                                            'sku'   => $sizeData['sku'],
+                                            'price' => $sizeData['price'],
+                                            'stock' => $sizeData['stock'],
+                                        ]);
+                                    }
                                 }
                             }
                         }
