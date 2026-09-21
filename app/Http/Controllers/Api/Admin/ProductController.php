@@ -146,6 +146,10 @@ class ProductController extends Controller
     }
     // ═══════════════════════════════════════════════════════════════
     // GET /admin/products
+    //
+    // NO PAGINATION — always returns EVERY matching product as a plain
+    // array in `data`.
+    //
     // Query params supported:
     //   ?is_published=1 ?is_today_sale=1 ?is_flash_sale=1 ?search=polo ?user_id=5
     //   ?category_id=2                (or "2,5" for multiple)
@@ -153,10 +157,8 @@ class ProductController extends Controller
     //   ?family_color_child_id=9      (or "9,10" for multiple)
     //   ?size=S,L
     //   ?min_price=0 ?max_price=5000
-    //   ?status=active|inactive|all   (default: active)
+    //   ?status=active|inactive|all   (default: active → is_active = 1 only)
     //   ?sort=price_asc|price_desc|name_asc|name_desc|newest|oldest
-    //   ?per_page=all                 (return every matching product, no pagination)
-    //   ?per_page=25                  (custom page size, max 100; default 15)
     // ═══════════════════════════════════════════════════════════════
     public function index(Request $request)
     {
@@ -171,7 +173,7 @@ class ProductController extends Controller
             ]);
 
             // ── Active / inactive status ─────────────────────────
-            // Default is "active" → is_active = 1 only.
+            // Default is "active" → only is_active = 1 rows are returned.
             $status = $request->query('status', 'active');
             if ($status === 'active') {
                 $query->where('is_active', true);
@@ -266,22 +268,11 @@ class ProductController extends Controller
             }
 
             // Tie-breaker so rows with identical created_at / price / name
-            // keep a stable order (prevents duplicates or gaps between pages).
+            // always come back in a stable order.
             $query->orderBy('id', 'desc');
 
-            // ── Pagination ─────────────────────────────────────────
-            //   per_page=all → every matching product (plain collection)
-            //   per_page=N   → paginated, N clamped to 1..100
-            //   (missing)    → paginated, 15 per page (previous behaviour)
-            $perPage = $request->query('per_page');
-
-            if ($perPage === 'all') {
-                $products = $query->get();
-            } else {
-                $size = is_numeric($perPage) ? (int) $perPage : 15;
-                $size = max(1, min($size, 100));
-                $products = $query->paginate($size);
-            }
+            // ── NO PAGINATION — return every matching product ─────
+            $products = $query->get();
 
             $userId = $request->query('user_id');
             $this->attachWishlistFlagToCollection($products, $userId);
