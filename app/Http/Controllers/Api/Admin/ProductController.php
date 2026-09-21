@@ -155,6 +155,8 @@ class ProductController extends Controller
     //   ?min_price=0 ?max_price=5000
     //   ?status=active|inactive|all   (default: active)
     //   ?sort=price_asc|price_desc|name_asc|name_desc|newest|oldest
+    //   ?per_page=all                 (return every matching product, no pagination)
+    //   ?per_page=25                  (custom page size, max 100; default 15)
     // ═══════════════════════════════════════════════════════════════
     public function index(Request $request)
     {
@@ -167,7 +169,9 @@ class ProductController extends Controller
                 'colorVariants.thumbnailImage',
                 'colorVariants.sizeStocks',
             ]);
+
             // ── Active / inactive status ─────────────────────────
+            // Default is "active" → is_active = 1 only.
             $status = $request->query('status', 'active');
             if ($status === 'active') {
                 $query->where('is_active', true);
@@ -175,6 +179,7 @@ class ProductController extends Controller
                 $query->where('is_active', false);
             }
             // 'all' → no filter applied
+
             // ── Boolean flag filters ─────────────────────────────
             if ($request->filled('is_published')) {
                 $query->where('is_published', filter_var($request->is_published, FILTER_VALIDATE_BOOLEAN));
@@ -185,10 +190,12 @@ class ProductController extends Controller
             if ($request->filled('is_flash_sale')) {
                 $query->where('is_flash_sale', filter_var($request->is_flash_sale, FILTER_VALIDATE_BOOLEAN));
             }
+
             // ── Search ────────────────────────────────────────────
             if ($request->filled('search')) {
                 $query->where('name', 'like', '%' . $request->search . '%');
             }
+
             // ── Category filter ───────────────────────────────────
             if ($request->filled('category_id')) {
                 $categoryIds = $this->toIdArray($request->query('category_id'));
@@ -196,6 +203,7 @@ class ProductController extends Controller
                     $query->whereIn('category_id', $categoryIds);
                 }
             }
+
             // ── Family color filter ───────────────────────────────
             if ($request->filled('family_color_id')) {
                 $familyColorIds = $this->toIdArray($request->query('family_color_id'));
@@ -205,6 +213,7 @@ class ProductController extends Controller
                     });
                 }
             }
+
             // ── Family color child filter ─────────────────────────
             if ($request->filled('family_color_child_id')) {
                 $childIds = $this->toIdArray($request->query('family_color_child_id'));
@@ -214,6 +223,7 @@ class ProductController extends Controller
                     });
                 }
             }
+
             // ── Size filter ────────────────────────────────────────
             if ($request->filled('size')) {
                 $sizes = $this->toStringArray($request->query('size'));
@@ -223,6 +233,7 @@ class ProductController extends Controller
                     });
                 }
             }
+
             // ── Price range filter ─────────────────────────────────
             if ($request->filled('min_price')) {
                 $query->where('unit_price', '>=', (float) $request->query('min_price'));
@@ -230,6 +241,7 @@ class ProductController extends Controller
             if ($request->filled('max_price')) {
                 $query->where('unit_price', '<=', (float) $request->query('max_price'));
             }
+
             // ── Sorting ────────────────────────────────────────────
             switch ($request->query('sort')) {
                 case 'price_asc':
@@ -252,9 +264,28 @@ class ProductController extends Controller
                     $query->latest();
                     break;
             }
-            $products = $query->paginate(15);
+
+            // Tie-breaker so rows with identical created_at / price / name
+            // keep a stable order (prevents duplicates or gaps between pages).
+            $query->orderBy('id', 'desc');
+
+            // ── Pagination ─────────────────────────────────────────
+            //   per_page=all → every matching product (plain collection)
+            //   per_page=N   → paginated, N clamped to 1..100
+            //   (missing)    → paginated, 15 per page (previous behaviour)
+            $perPage = $request->query('per_page');
+
+            if ($perPage === 'all') {
+                $products = $query->get();
+            } else {
+                $size = is_numeric($perPage) ? (int) $perPage : 15;
+                $size = max(1, min($size, 100));
+                $products = $query->paginate($size);
+            }
+
             $userId = $request->query('user_id');
             $this->attachWishlistFlagToCollection($products, $userId);
+
             return response()->json(['status' => 'success', 'data' => $products], 200);
         } catch (Exception $e) {
             Log::error('Product Index Error: ' . $e->getMessage());
@@ -492,7 +523,7 @@ class ProductController extends Controller
             return response()->json(['status' => 'error', 'message' => $e->getMessage() ?: 'Failed to create product.'], 500);
         }
     }
-        // ═══════════════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════════════════
     // POST /admin/products/{id}  — Update product
     //
     // Behavior contract:
