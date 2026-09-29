@@ -1,6 +1,9 @@
 <?php
+
 namespace App\Models;
+
 use Illuminate\Database\Eloquent\Model;
+
 class Product extends Model
 {
     protected $fillable = [
@@ -10,8 +13,9 @@ class Product extends Model
         'discount_start_date', 'discount_end_date', 'reward_points',
         'is_flash_sale', 'flash_sale_title', 'flash_sale_discount', 'flash_sale_discount_type',
         'is_today_sale', 'is_published', 'is_active',
-        'spotlight_image', 'seo_title', 'seo_description', 'seo_keywords',
+        'spotlight_image', 'size_chart', 'seo_title', 'seo_description', 'seo_keywords',
     ];
+
     protected $casts = [
         'is_flash_sale'       => 'boolean',
         'is_today_sale'       => 'boolean',
@@ -21,30 +25,37 @@ class Product extends Model
         'discount_end_date'   => 'date',
         'seo_keywords'        => 'array',
     ];
+
     protected $appends = ['effective_price'];
+
     // ─── Relationships ─────────────────────────────────────────────
     public function category()
     {
         return $this->belongsTo(Category::class);
     }
+
     public function colorVariants()
     {
         return $this->hasMany(ProductColorVariant::class);
     }
+
     public function reviews()
     {
         return $this->hasMany(Review::class);
     }
+
     // ─── Computed Price ────────────────────────────────────────────
     public function getEffectivePriceAttribute(): float
     {
         $price = (float) $this->unit_price;
+
         if ($this->is_flash_sale && $this->flash_sale_discount > 0) {
             if ($this->flash_sale_discount_type === 'percent') {
                 return round($price - ($price * $this->flash_sale_discount / 100), 2);
             }
             return round(max(0, $price - $this->flash_sale_discount), 2);
         }
+
         if ($this->discount > 0) {
             $now = now()->toDateString();
             $inRange = (
@@ -60,6 +71,7 @@ class Product extends Model
                 return round(max(0, $price - $this->discount), 2);
             }
         }
+
         return $price;
     }
 }
