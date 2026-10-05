@@ -24,12 +24,13 @@ class CategoryController extends Controller
             });
             return response()->json(['status' => 'success', 'data' => $categories], 200);
         } catch (Exception $e) {
+            Log::error('Category Index Error: ' . $e->getMessage());
             return response()->json(['status' => 'error', 'message' => 'Failed to retrieve categories.'], 500);
         }
     }
 
     /**
-     * GET: Single category by id (needed for Edit / View pages)
+     * GET: Single category by id
      */
     public function show($id)
     {
@@ -50,18 +51,26 @@ class CategoryController extends Controller
     public function store(Request $request)
     {
         $request->validate([
-            'name'        => 'required|string|max:255',
-            'type'        => 'required|string',
-            'parent_id'   => 'nullable',
-            'order_level' => 'nullable|integer',
-            'banner'      => 'required|image|mimes:jpeg,png,jpg|max:2048',
-            'icon'        => 'image|mimes:jpeg,png,jpg|max:512',
-            'cover'       => 'image|mimes:jpeg,png,jpg|max:2048',
+            'name'            => 'required|string|max:255',
+            'type'            => 'required|string',
+            'parent_id'       => 'nullable',
+            'order_level'     => 'nullable|integer',
+            'banner'          => 'required|image|mimes:jpeg,png,jpg|max:2048',
+            'icon'            => 'nullable|image|mimes:jpeg,png,jpg|max:512',
+            'cover'           => 'nullable|image|mimes:jpeg,png,jpg|max:2048',
+
+            // SEO
+            'seo_title'       => 'nullable|string|max:255',
+            'seo_description' => 'nullable|string|max:500',
+            'seo_keywords'    => 'nullable|string|max:1000', // comma separated
         ]);
 
         DB::beginTransaction();
         try {
-            $category = new Category($request->only(['name', 'type', 'parent_id', 'order_level']));
+            $category = new Category($request->only([
+                'name', 'type', 'parent_id', 'order_level',
+                'seo_title', 'seo_description', 'seo_keywords',
+            ]));
 
             if ($request->hasFile('banner')) {
                 $category->banner_path = $request->file('banner')->store('categories/banners', 's3');
@@ -90,18 +99,23 @@ class CategoryController extends Controller
 
     /**
      * POST (as PUT): Update category
-     * Only name, type, and the three images are editable.
+     * Editable: name, type, SEO fields, and the three images.
      */
     public function update(Request $request, $id)
     {
         $category = Category::findOrFail($id);
 
         $request->validate([
-            'name'   => 'sometimes|required|string|max:255',
-            'type'   => 'sometimes|required|string',
-            'banner' => 'nullable|image|mimes:jpeg,png,jpg|max:2048',
-            'icon'   => 'nullable|image|mimes:jpeg,png,jpg|max:512',
-            'cover'  => 'nullable|image|mimes:jpeg,png,jpg|max:2048',
+            'name'            => 'sometimes|required|string|max:255',
+            'type'            => 'sometimes|required|string',
+            'banner'          => 'nullable|image|mimes:jpeg,png,jpg|max:2048',
+            'icon'            => 'nullable|image|mimes:jpeg,png,jpg|max:512',
+            'cover'           => 'nullable|image|mimes:jpeg,png,jpg|max:2048',
+
+            // SEO
+            'seo_title'       => 'nullable|string|max:255',
+            'seo_description' => 'nullable|string|max:500',
+            'seo_keywords'    => 'nullable|string|max:1000',
         ]);
 
         DB::beginTransaction();
@@ -116,8 +130,10 @@ class CategoryController extends Controller
                 }
             }
 
-            // Only name/type are updatable text fields now
-            $category->update($request->only(['name', 'type']));
+            $category->update($request->only([
+                'name', 'type',
+                'seo_title', 'seo_description', 'seo_keywords',
+            ]));
 
             DB::commit();
 
@@ -141,7 +157,6 @@ class CategoryController extends Controller
         foreach (['banner_path', 'icon_path', 'cover_path'] as $field) {
             $urlField = str_replace('_path', '_url', $field);
 
-            // Generate a temporary URL valid for 30 minutes
             $category->$urlField = $category->$field
                 ? Storage::disk('s3')->temporaryUrl($category->$field, now()->addMinutes(30))
                 : null;
@@ -159,6 +174,7 @@ class CategoryController extends Controller
             $category->delete();
             return response()->json(['status' => 'success', 'message' => 'Category deleted successfully'], 200);
         } catch (Exception $e) {
+            Log::error('Category Delete Error: ' . $e->getMessage());
             return response()->json(['status' => 'error', 'message' => 'Delete failed.'], 500);
         }
     }
