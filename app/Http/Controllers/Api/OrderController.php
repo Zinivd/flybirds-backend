@@ -1,5 +1,7 @@
 <?php
+
 namespace App\Http\Controllers\Api;
+
 use App\Http\Controllers\Controller;
 use App\Models\Order;
 use App\Models\OrderItem;
@@ -18,13 +20,13 @@ use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Exception;
 use App\Mail\InvoiceMail;
 use Illuminate\Support\Facades\Mail;
+
 class OrderController extends Controller
 {
     public function __construct(
         protected WhatsAppService $whatsAppService,
         protected DelhiveryService $delhivery
-    ) {
-    }
+    ) {}
     private const DELIVERY_STATUSES = ['Packed', 'Shipped', 'In Transit', 'Out For Delivery', 'Delivered', 'RTO', 'Cancelled', 'Refunded'];
     private const PAYMENT_STATUSES = ['Pending', 'Paid', 'Failed', 'Refunded'];
     private const NON_CANCELLABLE_STATUSES = ['Delivered', 'Cancelled', 'Refunded'];
@@ -708,12 +710,15 @@ class OrderController extends Controller
     public function index(Request $request)
     {
         try {
-            $query = Order::placed()->with(array_merge(['items'], self::ITEM_DETAIL_RELATIONS));
+            // Lightweight: only an items count, no product/gallery relations.
+            $query = Order::placed()->withCount('items');
+
             if ($request->filled('search')) {
                 $search = $request->search;
                 $query->where(function ($q) use ($search) {
                     $q->where('order_id', 'like', "%{$search}%")
                         ->orWhere('invoice_number', 'like', "%{$search}%")
+                        ->orWhere('awb_number', 'like', "%{$search}%")
                         ->orWhere('customer_name', 'like', "%{$search}%")
                         ->orWhere('customer_email', 'like', "%{$search}%")
                         ->orWhere('seller_name', 'like', "%{$search}%")
@@ -734,10 +739,22 @@ class OrderController extends Controller
             if ($request->filled('date_to')) {
                 $query->whereDate('created_at', '<=', $request->date_to);
             }
-            $perPage = (int) $request->query('per_page', 20);
-            $orders = $query->orderBy('created_at', 'desc')->paginate($perPage > 0 ? $perPage : 20);
-            $this->attachFullItemDetails($orders);
-            return response()->json(['status' => 'success', 'data' => $orders], 200);
+
+            $query->orderBy('created_at', 'desc');
+
+            // Paginate only if a numeric per_page is explicitly sent.
+            $perPage = $request->query('per_page');
+            if ($perPage && strtolower((string) $perPage) !== 'all' && (int) $perPage > 0) {
+                return response()->json(['status' => 'success', 'data' => $query->paginate((int) $perPage)], 200);
+            }
+
+            // Default: everything. Same shape as the paginator (data.data) so Angular keeps working.
+            $orders = $query->get();
+
+            return response()->json([
+                'status' => 'success',
+                'data' => ['data' => $orders, 'total' => $orders->count()],
+            ], 200);
         } catch (Exception $e) {
             Log::error('Order Index Error: ' . $e->getMessage());
             return response()->json(['status' => 'error', 'message' => 'Failed to retrieve orders.'], 500);
@@ -765,7 +782,7 @@ class OrderController extends Controller
     public function myOrders(Request $request, $userId)
     {
         try {
-           $query = Order::placed()->with(array_merge(['items'], self::ITEM_DETAIL_RELATIONS))->where('customer_id', $userId);
+            $query = Order::placed()->with(array_merge(['items'], self::ITEM_DETAIL_RELATIONS))->where('customer_id', $userId);
             if ($request->filled('delivery_status')) {
                 $query->where('delivery_status', $request->delivery_status);
             }
@@ -954,7 +971,7 @@ class OrderController extends Controller
     public function invoiceMail($id)
     {
         try {
-           $order = Order::placed()->with(['items.productSizeStock'])->findOrFail($id);
+            $order = Order::placed()->with(['items.productSizeStock'])->findOrFail($id);
         } catch (ModelNotFoundException $e) {
             return response()->json(['status' => 'error', 'message' => 'Order not found.'], 404);
         }
