@@ -27,23 +27,20 @@ class OrderController extends Controller
         protected WhatsAppService $whatsAppService,
         protected DelhiveryService $delhivery
     ) {}
+
     private const DELIVERY_STATUSES = ['Packed', 'Shipped', 'In Transit', 'Out For Delivery', 'Delivered', 'RTO', 'Cancelled', 'Refunded'];
     private const PAYMENT_STATUSES = ['Pending', 'Paid', 'Failed', 'Refunded'];
     private const NON_CANCELLABLE_STATUSES = ['Delivered', 'Cancelled', 'Refunded'];
-    // ─────────────────────────────────────────────────────────────
-    // TAX DISABLED: GST is no longer calculated or added anywhere.
-    // `tax` is always persisted as 0.0 and never included in the
-    // `amount` sum. GST_RATE is intentionally NOT defined/used.
-    // ─────────────────────────────────────────────────────────────
-    // Fallback flat shipping charge, used only if Delhivery's live quote
-    // can't be resolved (no pincode, or the carrier API is down).
+
+    // TAX DISABLED: `tax` is always persisted as 0.0 and never added to `amount`.
     private const FALLBACK_SHIPPING_CHARGE = 49.0;
+
     private const COUPONS = [
         'SAVE10' => 10,
         'SAVE20' => 20,
         'FLAT50' => 50,
     ];
-    // Relations needed to expose full product/category/image details on order items
+
     private const ITEM_DETAIL_RELATIONS = [
         'items.product.category',
         'items.product.colorVariants.color',
@@ -52,20 +49,13 @@ class OrderController extends Controller
         'items.productColorVariant.thumbnailImage',
         'items.productSizeStock',
     ];
-    // ═══════════════════════════════════════════════════════════════
-    // PRIVATE HELPER: Warehouse/pickup pincode used for every live
-    // Delhivery shipping quote — pulled from config, not hardcoded
-    // per-file (both this controller and DelhiveryController must
-    // agree on the same origin, or quotes will silently diverge).
-    // ═══════════════════════════════════════════════════════════════
+
     private function warehousePincode(): string
     {
         return config('services.delhivery.origin_pin', '641603');
     }
-    // ═══════════════════════════════════════════════════════════════
-    // PRIVATE HELPER: Generate unique 18-char order ID
-    // Format: FLYODR-MMDD&A00001  (rolls to B00001 after 99999, etc.)
-    // ═══════════════════════════════════════════════════════════════
+
+    // Format: FLYODR-MMDD&A00001
     private function generateOrderId(): string
     {
         $current = DB::transaction(function () {
@@ -85,17 +75,17 @@ class OrderController extends Controller
             ]);
             return $next;
         });
+
         $batch = intdiv($current - 1, 99999);
         $remainder = (($current - 1) % 99999) + 1;
         $letter = chr(65 + ($batch % 26));
         $datePart = now()->format('md');
         $seqPart = $letter . str_pad((string) $remainder, 5, '0', STR_PAD_LEFT);
+
         return 'FLYODR-' . $datePart . '&' . $seqPart;
     }
-    // ═══════════════════════════════════════════════════════════════
-    // PRIVATE HELPER: Generate a unique sequential invoice number.
-    // Format: INV-00001, INV-00002, ...
-    // ═══════════════════════════════════════════════════════════════
+
+    // Format: INV-00001
     private function generateInvoiceNumber(): string
     {
         $next = DB::transaction(function () {
@@ -115,41 +105,35 @@ class OrderController extends Controller
             ]);
             return $next;
         });
+
         return 'INV-' . str_pad((string) $next, 5, '0', STR_PAD_LEFT);
     }
-    // ═══════════════════════════════════════════════════════════════
-    // PRIVATE HELPER: Clamp any stock number so it's never negative.
-    // ═══════════════════════════════════════════════════════════════
+
     private function clampStock($stock): int
     {
         return max(0, (int) $stock);
     }
-    // ═══════════════════════════════════════════════════════════════
-    // PRIVATE HELPER: Atomically decrement stock without going below zero.
-    // ═══════════════════════════════════════════════════════════════
+
     private function decrementStockSafely(int $sizeStockId, int $quantity): bool
     {
         $affected = DB::table('product_size_stocks')
             ->where('id', $sizeStockId)
             ->where('stock', '>=', $quantity)
             ->decrement('stock', $quantity);
+
         return $affected > 0;
     }
-    // ═══════════════════════════════════════════════════════════════
-    // PRIVATE HELPER: Compute the true, discounted, GST-inclusive unit
-    // price to charge for a line item — mirrors how `effective_price`
-    // is derived for product listing/detail endpoints. NEVER trust a
-    // client-supplied price; always recompute it here from the product
-    // and (if present) its size-stock override, honoring the discount
-    // window (discount_start_date / discount_end_date).
-    // ═══════════════════════════════════════════════════════════════
+
+    // Server-side effective (discounted) unit price. Never trust client prices.
     private function calculateEffectiveUnitPrice(Product $product, ?ProductSizeStock $sizeStock): float
     {
         $basePrice = (float) ($sizeStock->price ?? $product->unit_price ?? 0);
         $discount = (float) ($product->discount ?? 0);
+
         if ($discount <= 0) {
             return round($basePrice, 2);
         }
+
         $now = now();
         if ($product->discount_start_date && $now->lt($product->discount_start_date)) {
             return round($basePrice, 2);
@@ -157,51 +141,49 @@ class OrderController extends Controller
         if ($product->discount_end_date && $now->gt($product->discount_end_date)) {
             return round($basePrice, 2);
         }
+
         $discounted = $product->discount_type === 'percent'
             ? $basePrice - ($basePrice * $discount / 100)
             : $basePrice - $discount;
+
         return round(max(0, $discounted), 2);
     }
-    // ═══════════════════════════════════════════════════════════════
-    // PRIVATE HELPER: Resolve a coupon code into a discount amount.
-    // Only a fixed, server-known whitelist of codes is honored — the
-    // client can never dictate the discount amount directly.
-    // ═══════════════════════════════════════════════════════════════
+
     private function resolveCouponDiscount(?string $couponCode, float $subtotal): array
     {
         $code = strtoupper(trim((string) $couponCode));
         if ($code === '' || !isset(self::COUPONS[$code])) {
             return [null, 0.0];
         }
+
         $percent = self::COUPONS[$code];
         $discount = round(($subtotal * $percent) / 100, 2);
+
         return [$code, $discount];
     }
-    // ═══════════════════════════════════════════════════════════════
-    // PRIVATE HELPER: Attach full product/category/image detail to
-    // every OrderItem on a single Order, a plain collection of Orders,
-    // or a paginator of Orders — without disturbing the frozen
-    // snapshot fields (product_name, color, size, price) captured at
-    // checkout time. Adds a 'product_details' attribute to each item.
-    // ═══════════════════════════════════════════════════════════════
+
     private function attachFullItemDetails($orderOrOrders)
     {
         $isPaginator = method_exists($orderOrOrders, 'getCollection');
         $orders = $isPaginator
             ? $orderOrOrders->getCollection()
             : ($orderOrOrders instanceof \Illuminate\Support\Collection ? $orderOrOrders : collect([$orderOrOrders]));
+
         foreach ($orders as $order) {
             if (!$order->relationLoaded('items')) {
                 continue;
             }
+
             $order->items->each(function ($item) {
                 $product = $item->relationLoaded('product') ? $item->product : null;
                 $colorVariant = $item->relationLoaded('productColorVariant') ? $item->productColorVariant : null;
                 $sizeStock = $item->relationLoaded('productSizeStock') ? $item->productSizeStock : null;
+
                 $thumbnail = $colorVariant?->thumbnailImage?->image_url ?? null;
                 $gallery = ($colorVariant && $colorVariant->galleryImages)
                     ? $colorVariant->galleryImages->pluck('image_url')->values()
                     : collect([]);
+
                 $item->setAttribute('product_details', [
                     'product_id' => $product->id ?? $item->product_id,
                     'name' => $product->name ?? $item->product_name,
@@ -236,10 +218,12 @@ class OrderController extends Controller
                 ]);
             });
         }
+
         return $orderOrOrders;
     }
+
     // ═══════════════════════════════════════════════════════════════
-    // GET /orders/check-stock?product_id=5&product_size_stock_id=34&quantity=2
+    // GET /orders/check-stock
     // ═══════════════════════════════════════════════════════════════
     public function checkStock(Request $request)
     {
@@ -256,15 +240,19 @@ class OrderController extends Controller
                 'errors' => $e->errors(),
             ], 422);
         }
+
         try {
             $product = Product::find($validated['product_id']);
             $requestedQty = $validated['quantity'] ?? 1;
+
             if (!empty($validated['product_size_stock_id'])) {
                 $sizeStock = ProductSizeStock::find($validated['product_size_stock_id']);
                 if (!$sizeStock) {
                     return response()->json(['status' => 'error', 'message' => 'Size/stock variant not found.'], 404);
                 }
+
                 $available = $this->clampStock($sizeStock->stock);
+
                 return response()->json([
                     'status' => 'success',
                     'data' => [
@@ -278,6 +266,7 @@ class OrderController extends Controller
                     ],
                 ], 200);
             }
+
             return response()->json([
                 'status' => 'success',
                 'data' => [
@@ -290,27 +279,26 @@ class OrderController extends Controller
             return response()->json(['status' => 'error', 'message' => 'Failed to check stock.'], 500);
         }
     }
-    // ═══════════════════════════════════════════════════════════════
-    // PRIVATE HELPER: Resolve the checkout line items. Prices are ALWAYS
-    // recomputed server-side from the product/size-stock records — a
-    // client can never dictate the unit price, discount, shipping, or
-    // tax that ends up on the order.
-    // ═══════════════════════════════════════════════════════════════
+
     private function resolveCheckoutItems(array $rawItems): array
     {
         $resolved = [];
+
         foreach ($rawItems as $line) {
             $product = Product::find($line['product_id']);
             if (!$product) {
                 throw new Exception("Product #{$line['product_id']} no longer exists.");
             }
+
             $quantity = $line['quantity'] ?? 1;
             $sizeStock = null;
+
             if (!empty($line['product_size_stock_id'])) {
                 $sizeStock = ProductSizeStock::where('id', $line['product_size_stock_id'])->lockForUpdate()->first();
                 if (!$sizeStock) {
                     throw new Exception("Selected size/stock for '{$product->name}' no longer exists.");
                 }
+
                 $availableStock = $this->clampStock($sizeStock->stock);
                 if ($availableStock <= 0) {
                     throw new Exception("'{$product->name}' ({$sizeStock->size}) is out of stock.");
@@ -319,14 +307,18 @@ class OrderController extends Controller
                     throw new Exception("Insufficient stock for '{$product->name}' ({$sizeStock->size}). Only {$availableStock} left.");
                 }
             }
+
             $mrp = round((float) ($sizeStock->price ?? $product->unit_price ?? 0), 2);
-            $unitPrice = $this->calculateEffectiveUnitPrice($product, $sizeStock); // discounted price
+            $unitPrice = $this->calculateEffectiveUnitPrice($product, $sizeStock);
+
             $colorName = null;
             $sizeName = $sizeStock->size ?? null;
+
             if (!empty($line['product_color_variant_id'])) {
                 $colorVariant = $product->colorVariants()->with('color')->find($line['product_color_variant_id']);
                 $colorName = $colorVariant?->color?->name ?? null;
             }
+
             $resolved[] = [
                 'product_id' => $product->id,
                 'product_color_variant_id' => $line['product_color_variant_id'] ?? null,
@@ -334,64 +326,52 @@ class OrderController extends Controller
                 'product_name' => $product->name,
                 'color' => $colorName,
                 'size' => $sizeName,
-                'weight_kg' => (float) ($product->weight ?? 0.3), // used to compute shipping weight
+                'weight_kg' => (float) ($product->weight ?? 0.3),
                 'mrp' => $mrp,
                 'mrp_total' => round($mrp * $quantity, 2),
-                'price' => $unitPrice,             // discounted unit price — stored on OrderItem
+                'price' => $unitPrice,
                 'quantity' => $quantity,
-                'total' => round($unitPrice * $quantity, 2), // discounted line total — stored on OrderItem
+                'total' => round($unitPrice * $quantity, 2),
             ];
         }
+
         return $resolved;
     }
-    // ═══════════════════════════════════════════════════════════════
-    // PRIVATE HELPER: Total shipment weight in grams from resolved
-    // checkout lines (used before the Order/OrderItems exist yet).
-    // ═══════════════════════════════════════════════════════════════
+
     private function calculateWeightFromLines(array $lines): int
     {
         $totalGrams = 0;
         foreach ($lines as $line) {
             $totalGrams += ($line['weight_kg'] ?? 0.3) * 1000 * $line['quantity'];
         }
+
         return max(1, (int) round($totalGrams));
     }
-    // ═══════════════════════════════════════════════════════════════
-    // PRIVATE HELPER: Total shipment weight in grams from an already-
-    // persisted Order's items (used by confirmCod()/shippingQuote()).
-    // Falls back to a configured default per item if product weight
-    // isn't set.
-    // ═══════════════════════════════════════════════════════════════
+
     private function calculateOrderWeight(Order $order): int
     {
-        $items = $order->items()->with('product')->get(); // fresh Collection
+        $items = $order->items()->with('product')->get();
         $totalGrams = 0;
+
         foreach ($items as $item) {
             $weightKg = (float) ($item->product->weight ?? 0.3);
             $totalGrams += $weightKg * 1000 * $item->quantity;
         }
+
         return $totalGrams > 0
             ? (int) round($totalGrams)
             : (int) config('services.delhivery.default_weight_grams', 500);
     }
-    // ═══════════════════════════════════════════════════════════════
-    // PRIVATE HELPER: Pull a 6-digit pincode out of a free-text address
-    // string when a structured shipping_pincode column isn't set.
-    // ═══════════════════════════════════════════════════════════════
+
     private function extractPincodeFromAddress(?string $address): ?string
     {
         if ($address && preg_match('/(\d{6})/', $address, $m)) {
             return $m[1];
         }
+
         return null;
     }
-    // ═══════════════════════════════════════════════════════════════
-    // PRIVATE HELPER: Single source of truth for shipping cost — always
-    // a LIVE quote from Delhivery, keyed by payment method (COD carries
-    // a cod_amount, Prepaid doesn't). Falls back to a flat charge only
-    // if there's no pincode to quote against or Delhivery is unreachable,
-    // so checkout never hard-fails just because the carrier API hiccupped.
-    // ═══════════════════════════════════════════════════════════════
+
     private function resolveShippingCharge(
         Order $order,
         float $taxableAmount,
@@ -401,9 +381,11 @@ class OrderController extends Controller
         if (!$pincode) {
             return self::FALLBACK_SHIPPING_CHARGE;
         }
+
         $weightGrams = $this->calculateOrderWeight($order);
         $paymentMode = strtolower($paymentMethod) === 'cod' ? 'COD' : 'Prepaid';
         $codAmount = $paymentMode === 'COD' ? $taxableAmount : 0;
+
         try {
             $result = $this->delhivery->calculateShippingCost(
                 $this->warehousePincode(),
@@ -412,6 +394,7 @@ class OrderController extends Controller
                 $paymentMode,
                 $codAmount
             );
+
             if ($result['success'] ?? false) {
                 $charge = (float) ($result['data']['total_amount'] ?? $result['total_amount'] ?? self::FALLBACK_SHIPPING_CHARGE);
                 return round($charge, 2);
@@ -419,10 +402,18 @@ class OrderController extends Controller
         } catch (Exception $e) {
             Log::error('Shipping quote failed for order ' . $order->id . ': ' . $e->getMessage());
         }
+
         return self::FALLBACK_SHIPPING_CHARGE;
     }
+
     // ═══════════════════════════════════════════════════════════════
     // POST /orders/checkout
+    //
+    // Creates the order in an UNPLACED state (placed_at = null). It only
+    // becomes a "placed" order once the customer completes payment
+    // (Razorpay -> payment_status 'Paid') or confirms Cash on Delivery
+    // (confirmCod sets placed_at). Until then it appears in the
+    // upcoming-orders API, not the main orders list.
     // ═══════════════════════════════════════════════════════════════
     public function checkout(Request $request)
     {
@@ -437,10 +428,6 @@ class OrderController extends Controller
                 'shipping_address' => 'required|string',
                 'shipping_pincode' => 'nullable|digits:6',
                 'billing_address' => 'nullable|string',
-                // Discount, shipping, and tax are NEVER accepted from the
-                // client — they are always recomputed below. Only a coupon
-                // *code* (validated against a server-side whitelist) may
-                // be supplied.
                 'coupon_code' => 'nullable|string|max:30',
                 'transaction_id' => 'nullable|exists:transactions,id',
                 'items' => 'sometimes|array|min:1',
@@ -456,20 +443,25 @@ class OrderController extends Controller
                 'errors' => $e->errors(),
             ], 422);
         }
+
         DB::beginTransaction();
+
         try {
             $userId = $validated['user_id'];
             $usedCart = false;
+
             if (!empty($validated['items'])) {
                 $rawItems = $validated['items'];
             } else {
                 $cartItems = CartWishlistData::where('user_id', $userId)
                     ->where('type', 'cart')
                     ->get();
+
                 if ($cartItems->isEmpty()) {
                     DB::rollBack();
                     return response()->json(['status' => 'error', 'message' => 'Cart is empty.'], 422);
                 }
+
                 $rawItems = $cartItems->map(function ($item) {
                     return [
                         'product_id' => $item->product_id,
@@ -480,33 +472,31 @@ class OrderController extends Controller
                 })->toArray();
                 $usedCart = true;
             }
+
             $lines = $this->resolveCheckoutItems($rawItems);
-            // Spec #2: subtotal = sum of MRP × qty (pre-discount)
+
             $subtotal = round(array_sum(array_column($lines, 'mrp_total')), 2);
-            // Spec #3: product discount = sum of (mrp - discountedPrice) × qty
             $productDiscount = round($subtotal - array_sum(array_column($lines, 'total')), 2);
-            // Coupon discount (server-whitelisted only), applied on top of product discount
+
             [$couponCode, $couponDiscount] = $this->resolveCouponDiscount(
                 $validated['coupon_code'] ?? null,
                 round($subtotal - $productDiscount, 2),
             );
+
             $discount = round($productDiscount + $couponDiscount, 2);
-            // Spec #4: taxable amount = subtotal - discount
             $taxableAmount = round($subtotal - $discount, 2);
-            // ─────────────────────────────────────────────────────────
-            // TAX DISABLED: tax is no longer calculated. Always 0, and
-            // never added into `amount`.
-            // ─────────────────────────────────────────────────────────
+
             $tax = 0.0;
-            // Placeholder shipping — replaced with a live Delhivery quote
-            // once the Order + its items actually exist below (the quote
-            // needs the order's weight/pincode/payment method).
             $shippingCharge = self::FALLBACK_SHIPPING_CHARGE;
             $amount = round($taxableAmount + $shippingCharge, 2);
+
             if (round($taxableAmount, 2) < 0) {
                 DB::rollBack();
                 return response()->json(['status' => 'error', 'message' => 'Discount cannot exceed order subtotal.'], 422);
             }
+
+            $isCod = strtolower($validated['payment_method']) === 'cod';
+
             $order = Order::create([
                 'order_id' => $this->generateOrderId(),
                 'customer_id' => $userId,
@@ -525,15 +515,17 @@ class OrderController extends Controller
                 'shipping_address' => $validated['shipping_address'],
                 'shipping_pincode' => $validated['shipping_pincode'] ?? $this->extractPincodeFromAddress($validated['shipping_address']),
                 'billing_address' => $validated['billing_address'] ?? null,
+                // COD sent directly at checkout is already "placed";
+                // anything else stays upcoming until payment completes.
+                'placed_at' => $isCod ? now() : null,
             ]);
-            // Link this order to a pre-created Razorpay Transaction
-            // (from PaymentController::createOrder), so verifyPayment()
-            // can later find it and update payment_status correctly.
+
             if (!empty($validated['transaction_id'])) {
                 Transaction::where('id', $validated['transaction_id'])
                     ->whereNull('order_table_id')
                     ->update(['order_table_id' => $order->id]);
             }
+
             foreach ($lines as $line) {
                 OrderItem::create([
                     'order_table_id' => $order->id,
@@ -547,6 +539,7 @@ class OrderController extends Controller
                     'quantity' => $line['quantity'],
                     'total' => $line['total'],
                 ]);
+
                 if ($line['product_size_stock_id']) {
                     $success = $this->decrementStockSafely($line['product_size_stock_id'], $line['quantity']);
                     if (!$success) {
@@ -554,10 +547,7 @@ class OrderController extends Controller
                     }
                 }
             }
-            // Now that items are persisted, get the real, live shipping
-            // quote for the chosen payment method and correct the order's
-            // shipping/amount before it's committed. Tax stays 0 and is
-            // never re-added here.
+
             $order->refresh();
             $liveShippingCharge = $this->resolveShippingCharge($order, $taxableAmount, $validated['payment_method']);
             if ($liveShippingCharge !== $shippingCharge) {
@@ -566,31 +556,20 @@ class OrderController extends Controller
                 $order->amount = $amount;
                 $order->save();
             }
+
             if ($usedCart) {
                 CartWishlistData::where('user_id', $userId)->where('type', 'cart')->delete();
             }
+
             DB::commit();
-            // ─────────────────────────────────────────────────────────
-            // FIX: COD orders never transition to payment_status =
-            // 'Paid' at placement time (that only happens later, on
-            // delivery, via updateStatus()). So the invoice email/
-            // WhatsApp — which used to be wired ONLY to that 'Paid'
-            // transition — never fired for COD orders at all.
-            //
-            // For COD, "order placed" IS the moment to send the
-            // invoice (payment is collected later, but the order/
-            // invoice itself is confirmed now). Fire it here, outside
-            // the DB transaction (it's an external I/O call — email/
-            // WhatsApp — and must never roll back the order if it
-            // fails; sendInvoiceEmail() already swallows its own
-            // errors internally).
-            // ─────────────────────────────────────────────────────────
-            if (strtolower($validated['payment_method']) === 'cod') {
+
+            if ($isCod) {
                 $this->maybeSendInvoice($order->fresh()->load('items.productSizeStock'));
             }
+
             return response()->json([
                 'status' => 'success',
-                'message' => 'Order placed successfully.',
+                'message' => $isCod ? 'Order placed successfully.' : 'Order created. Complete payment to place it.',
                 'data' => $order->load('items'),
             ], 201);
         } catch (Exception $e) {
@@ -602,34 +581,34 @@ class OrderController extends Controller
             ], 500);
         }
     }
+
     // ═══════════════════════════════════════════════════════════════
     // GET /orders/{id}/shipping-quote?payment_method=cod|razorpay
-    //
-    // Frontend calls THIS to preview shipping when the customer switches
-    // payment method — never calls Delhivery directly. Persists the
-    // result on the order so confirmCod()/verifyPayment() charge exactly
-    // what was quoted here. Tax is always 0 and never included.
     // ═══════════════════════════════════════════════════════════════
     public function shippingQuote(Request $request, $id)
     {
         $validated = $request->validate([
             'payment_method' => 'required|in:cod,razorpay',
         ]);
+
         try {
             $order = Order::with('items')->findOrFail($id);
         } catch (ModelNotFoundException $e) {
             return response()->json(['status' => 'error', 'message' => 'Order not found.'], 404);
         }
+
         try {
             $taxableAmount = round((float) $order->subtotal - (float) $order->discount, 2);
             $shippingCharge = $this->resolveShippingCharge($order, $taxableAmount, $validated['payment_method']);
             $tax = 0.0;
             $amount = round($taxableAmount + $shippingCharge, 2);
+
             $order->shipping = $shippingCharge;
             $order->tax = $tax;
             $order->amount = $amount;
             $order->payment_method = $validated['payment_method'];
             $order->save();
+
             return response()->json([
                 'status' => 'success',
                 'data' => [
@@ -645,15 +624,10 @@ class OrderController extends Controller
             return response()->json(['status' => 'error', 'message' => 'Failed to calculate shipping.'], 500);
         }
     }
+
     // ═══════════════════════════════════════════════════════════════
     // POST /orders/{id}/cod-confirm
-    //
-    // Called from the payment page when the customer picks Cash on
-    // Delivery instead of Razorpay. The amount/shipping figures are NOT
-    // taken from the request body — they're recomputed here from a live
-    // Delhivery quote using the order's already-frozen subtotal/discount,
-    // via the same resolveShippingCharge() used everywhere else. Tax is
-    // always 0 and never included in the recomputed amount.
+    // Confirming COD is what turns an upcoming order into a placed one.
     // ═══════════════════════════════════════════════════════════════
     public function confirmCod(Request $request, $id)
     {
@@ -662,38 +636,39 @@ class OrderController extends Controller
         } catch (ModelNotFoundException $e) {
             return response()->json(['status' => 'error', 'message' => 'Order not found.'], 404);
         }
+
         if ($order->payment_status === 'Paid') {
             return response()->json([
                 'status' => 'error',
                 'message' => 'This order has already been paid for.',
             ], 422);
         }
+
         if (in_array($order->delivery_status, self::NON_CANCELLABLE_STATUSES)) {
             return response()->json([
                 'status' => 'error',
                 'message' => "Order cannot be confirmed because it is already '{$order->delivery_status}'.",
             ], 422);
         }
+
         try {
             $taxableAmount = round((float) $order->subtotal - (float) $order->discount, 2);
             $shippingCharge = $this->resolveShippingCharge($order, $taxableAmount, 'cod');
             $tax = 0.0;
             $amount = round($taxableAmount + $shippingCharge, 2);
+
             $order->payment_method = 'cod';
-            $order->payment_status = 'Pending'; // collected on delivery, marked Paid later via updateStatus()
+            $order->payment_status = 'Pending';
             $order->shipping = $shippingCharge;
             $order->tax = $tax;
             $order->amount = $amount;
+            if (empty($order->placed_at)) {
+                $order->placed_at = now(); // order is now officially placed
+            }
             $order->save();
-            // ─────────────────────────────────────────────────────────
-            // FIX: if the frontend's COD flow goes through THIS endpoint
-            // (rather than payment_method='cod' being set at checkout
-            // time), this is the actual "order placed" moment for COD —
-            // so send the invoice here too. maybeSendInvoice() checks
-            // invoice_number first, so if checkout() already sent it,
-            // this is a safe no-op (no duplicate email/WhatsApp).
-            // ─────────────────────────────────────────────────────────
+
             $this->maybeSendInvoice($order->fresh()->load('items.productSizeStock'));
+
             return response()->json([
                 'status' => 'success',
                 'message' => 'Order confirmed for Cash on Delivery.',
@@ -704,70 +679,103 @@ class OrderController extends Controller
             return response()->json(['status' => 'error', 'message' => 'Failed to confirm Cash on Delivery order.'], 500);
         }
     }
+
     // ═══════════════════════════════════════════════════════════════
-    // GET /orders  — Admin list with search & filtering
+    // PRIVATE HELPER: Shared search/status/date filters for list endpoints.
+    // ═══════════════════════════════════════════════════════════════
+    private function applyListFilters($query, Request $request)
+    {
+        if ($request->filled('search')) {
+            $search = $request->search;
+            $query->where(function ($q) use ($search) {
+                $q->where('order_id', 'like', "%{$search}%")
+                    ->orWhere('invoice_number', 'like', "%{$search}%")
+                    ->orWhere('awb_number', 'like', "%{$search}%")
+                    ->orWhere('customer_name', 'like', "%{$search}%")
+                    ->orWhere('customer_email', 'like', "%{$search}%")
+                    ->orWhere('seller_name', 'like', "%{$search}%")
+                    ->orWhere('delivery_status', 'like', "%{$search}%")
+                    ->orWhere('payment_method', 'like', "%{$search}%")
+                    ->orWhere('payment_status', 'like', "%{$search}%");
+            });
+        }
+        if ($request->filled('delivery_status')) {
+            $query->where('delivery_status', $request->delivery_status);
+        }
+        if ($request->filled('payment_status')) {
+            $query->where('payment_status', $request->payment_status);
+        }
+        if ($request->filled('date_from')) {
+            $query->whereDate('created_at', '>=', $request->date_from);
+        }
+        if ($request->filled('date_to')) {
+            $query->whereDate('created_at', '<=', $request->date_to);
+        }
+
+        return $query->orderBy('created_at', 'desc');
+    }
+
+    private function listResponse($query, Request $request)
+    {
+        $perPage = $request->query('per_page');
+        if ($perPage && strtolower((string) $perPage) !== 'all' && (int) $perPage > 0) {
+            return response()->json(['status' => 'success', 'data' => $query->paginate((int) $perPage)], 200);
+        }
+
+        $orders = $query->get();
+
+        return response()->json([
+            'status' => 'success',
+            'data' => ['data' => $orders, 'total' => $orders->count()],
+        ], 200);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // GET /orders — Admin list. ONLY PLACED orders (paid, or COD-confirmed).
     // ═══════════════════════════════════════════════════════════════
     public function index(Request $request)
     {
         try {
-            // Lightweight: only an items count, no product/gallery relations.
             $query = Order::placed()->withCount('items');
+            $this->applyListFilters($query, $request);
 
-            if ($request->filled('search')) {
-                $search = $request->search;
-                $query->where(function ($q) use ($search) {
-                    $q->where('order_id', 'like', "%{$search}%")
-                        ->orWhere('invoice_number', 'like', "%{$search}%")
-                        ->orWhere('awb_number', 'like', "%{$search}%")
-                        ->orWhere('customer_name', 'like', "%{$search}%")
-                        ->orWhere('customer_email', 'like', "%{$search}%")
-                        ->orWhere('seller_name', 'like', "%{$search}%")
-                        ->orWhere('delivery_status', 'like', "%{$search}%")
-                        ->orWhere('payment_method', 'like', "%{$search}%")
-                        ->orWhere('payment_status', 'like', "%{$search}%");
-                });
-            }
-            if ($request->filled('delivery_status')) {
-                $query->where('delivery_status', $request->delivery_status);
-            }
-            if ($request->filled('payment_status')) {
-                $query->where('payment_status', $request->payment_status);
-            }
-            if ($request->filled('date_from')) {
-                $query->whereDate('created_at', '>=', $request->date_from);
-            }
-            if ($request->filled('date_to')) {
-                $query->whereDate('created_at', '<=', $request->date_to);
-            }
-
-            $query->orderBy('created_at', 'desc');
-
-            // Paginate only if a numeric per_page is explicitly sent.
-            $perPage = $request->query('per_page');
-            if ($perPage && strtolower((string) $perPage) !== 'all' && (int) $perPage > 0) {
-                return response()->json(['status' => 'success', 'data' => $query->paginate((int) $perPage)], 200);
-            }
-
-            // Default: everything. Same shape as the paginator (data.data) so Angular keeps working.
-            $orders = $query->get();
-
-            return response()->json([
-                'status' => 'success',
-                'data' => ['data' => $orders, 'total' => $orders->count()],
-            ], 200);
+            return $this->listResponse($query, $request);
         } catch (Exception $e) {
             Log::error('Order Index Error: ' . $e->getMessage());
             return response()->json(['status' => 'error', 'message' => 'Failed to retrieve orders.'], 500);
         }
     }
+
     // ═══════════════════════════════════════════════════════════════
-    // GET /orders/{id}  — Admin order detail
+    // GET /orders/upcoming — Orders that were started (checkout reached)
+    // but NOT yet placed: no completed payment and no COD confirmation.
+    // Optional: ?user_id=... to scope to one customer.
     // ═══════════════════════════════════════════════════════════════
+    public function upcomingOrders(Request $request)
+    {
+        try {
+            $query = Order::upcoming()->withCount('items');
+
+            if ($request->filled('user_id')) {
+                $query->where('customer_id', $request->user_id);
+            }
+
+            $this->applyListFilters($query, $request);
+
+            return $this->listResponse($query, $request);
+        } catch (Exception $e) {
+            Log::error('Upcoming Orders Error: ' . $e->getMessage());
+            return response()->json(['status' => 'error', 'message' => 'Failed to retrieve upcoming orders.'], 500);
+        }
+    }
+
+    // GET /orders/{id}
     public function show($id)
     {
         try {
             $order = Order::with(array_merge(['items', 'customer'], self::ITEM_DETAIL_RELATIONS))->findOrFail($id);
             $this->attachFullItemDetails($order);
+
             return response()->json(['status' => 'success', 'data' => $order], 200);
         } catch (ModelNotFoundException $e) {
             return response()->json(['status' => 'error', 'message' => 'Order not found.'], 404);
@@ -776,28 +784,27 @@ class OrderController extends Controller
             return response()->json(['status' => 'error', 'message' => 'Failed to retrieve order details.'], 500);
         }
     }
-    // ═══════════════════════════════════════════════════════════════
-    // GET /users/{userId}/orders  — Customer's own order history
-    // ═══════════════════════════════════════════════════════════════
+
+    // GET /users/{userId}/orders — customer's placed orders only
     public function myOrders(Request $request, $userId)
     {
         try {
             $query = Order::placed()->with(array_merge(['items'], self::ITEM_DETAIL_RELATIONS))->where('customer_id', $userId);
+
             if ($request->filled('delivery_status')) {
                 $query->where('delivery_status', $request->delivery_status);
             }
+
             $orders = $query->orderBy('created_at', 'desc')->get();
             $this->attachFullItemDetails($orders);
+
             return response()->json(['status' => 'success', 'data' => $orders], 200);
         } catch (Exception $e) {
             Log::error('My Orders Error: ' . $e->getMessage());
             return response()->json(['status' => 'error', 'message' => 'Failed to retrieve your orders.'], 500);
         }
     }
-    // ═══════════════════════════════════════════════════════════════
-    // PRIVATE HELPER: Build the invoice data array for a given order.
-    // Used by invoice(), invoiceMail(), and sendInvoiceEmail().
-    // ═══════════════════════════════════════════════════════════════
+
     private function buildInvoiceData(Order $order): array
     {
         if (empty($order->invoice_number)) {
@@ -805,7 +812,9 @@ class OrderController extends Controller
             $order->invoice_date = now();
             $order->save();
         }
+
         $company = config('company', []);
+
         $items = $order->items->map(function ($item) {
             $description = $item->product_name;
             if ($item->color) {
@@ -814,6 +823,7 @@ class OrderController extends Controller
             if ($item->size) {
                 $description .= ' (' . $item->size . ')';
             }
+
             return [
                 'description' => $description,
                 'sku' => $item->productSizeStock?->sku ?? null,
@@ -822,6 +832,7 @@ class OrderController extends Controller
                 'amount' => (float) $item->total,
             ];
         })->values()->all();
+
         return [
             'company' => [
                 'name' => $company['name'] ?? 'Flybirds',
@@ -856,26 +867,19 @@ class OrderController extends Controller
             'subtotal' => (float) $order->subtotal,
             'discount' => (float) $order->discount,
             'shipping_charge' => (float) $order->shipping,
-            'tax' => (float) $order->tax, // always 0 now — tax disabled
+            'tax' => (float) $order->tax,
             'total' => (float) $order->amount,
         ];
     }
-    // ═══════════════════════════════════════════════════════════════
-    // PRIVATE HELPER: Render the invoice PDF and upload it to S3,
-    // returning a short-lived signed URL — WhatsApp/rcloud fetch the
-    // document header from the public internet, so it can't live on
-    // local/public disk unless this app itself is internet-reachable.
-    //
-    // The S3 object is NOT made public (invoices carry customer PII).
-    // A 30-minute signed URL is generated instead — plenty of time for
-    // rcloud to fetch and attach it once, then it stops working.
-    // ═══════════════════════════════════════════════════════════════
+
     private function resolveInvoicePdfUrl(Order $order, array $invoiceData): ?string
     {
         try {
             $pdf = \PDF::loadView('invoices.pdf', ['data' => $invoiceData]);
             $relativePath = 'invoices/' . $order->order_id . '.pdf';
+
             Storage::disk('s3')->put($relativePath, $pdf->output());
+
             return Storage::disk('s3')->temporaryUrl(
                 $relativePath,
                 now()->addMinutes(30)
@@ -885,16 +889,7 @@ class OrderController extends Controller
             return null;
         }
     }
-    // ═══════════════════════════════════════════════════════════════
-    // PRIVATE HELPER: Send the invoice via WhatsApp using the
-    // 'payment_invoice_success' template (id 4388937431421342, en).
-    // Body placeholders: {{1}} customer name, {{2}} amount, {{3}} order
-    // id, {{4}} payment date. Header is the invoice PDF as a document.
-    //
-    // Never throws — logs and swallows errors, same pattern as
-    // sendInvoiceEmail(), so a WhatsApp failure never breaks checkout
-    // or status updates.
-    // ═══════════════════════════════════════════════════════════════
+
     private function sendInvoiceWhatsApp(Order $order, array $invoiceData): void
     {
         try {
@@ -902,17 +897,16 @@ class OrderController extends Controller
                 Log::info('Invoice WhatsApp skipped — no phone on file for Order #' . $order->id);
                 return;
             }
+
             $template = config('whatsapp_templates.invoice');
             $waPhone = '91' . ltrim($order->customer_phone, '0');
             $pdfUrl = $this->resolveInvoicePdfUrl($order, $invoiceData);
-            // The approved template's type is "Document" — it has a
-            // mandatory document header. Sending without one always
-            // fails (#132012), so skip the API call entirely if the
-            // PDF didn't generate rather than send a doomed request.
+
             if (!$pdfUrl) {
                 Log::error('WhatsApp invoice skipped — no PDF URL for Order #' . $order->id);
                 return;
             }
+
             $bodyParams = [
                 $order->customer_name,
                 number_format((float) $order->amount, 2),
@@ -920,7 +914,9 @@ class OrderController extends Controller
                 optional($order->invoice_date ?? $order->created_at)->format('d M Y')
                     ?? now()->format('d M Y'),
             ];
+
             $filename = 'Invoice-' . $order->order_id . '.pdf';
+
             Log::info('WhatsApp invoice send attempt', [
                 'to' => $waPhone,
                 'template' => $template['name'],
@@ -929,6 +925,7 @@ class OrderController extends Controller
                 'pdf_url' => $pdfUrl,
                 'filename' => $filename,
             ]);
+
             $sent = $this->whatsAppService->sendTemplateMessage(
                 to: $waPhone,
                 templateName: $template['name'],
@@ -937,6 +934,7 @@ class OrderController extends Controller
                 documentUrl: $pdfUrl,
                 documentFilename: $filename,
             );
+
             if (!$sent) {
                 Log::error('WhatsApp invoice send failed for Order #' . $order->id);
             }
@@ -944,10 +942,8 @@ class OrderController extends Controller
             Log::error('Invoice WhatsApp Error (Order #' . $order->id . '): ' . $e->getMessage());
         }
     }
-    // ═══════════════════════════════════════════════════════════════
+
     // GET /orders/{id}/invoice
-    // Returns invoice JSON data for the frontend Angular view to render.
-    // ═══════════════════════════════════════════════════════════════
     public function invoice($id)
     {
         try {
@@ -955,6 +951,7 @@ class OrderController extends Controller
         } catch (ModelNotFoundException $e) {
             return response()->json(['status' => 'error', 'message' => 'Order not found.'], 404);
         }
+
         try {
             $data = $this->buildInvoiceData($order);
             return response()->json(['status' => 'success', 'data' => $data], 200);
@@ -963,11 +960,8 @@ class OrderController extends Controller
             return response()->json(['status' => 'error', 'message' => 'Failed to generate invoice.'], 500);
         }
     }
-    // ═══════════════════════════════════════════════════════════════
+
     // POST /orders/{id}/invoice-mail
-    // Generates the invoice PDF and emails + WhatsApps it to the
-    // customer on demand.
-    // ═══════════════════════════════════════════════════════════════
     public function invoiceMail($id)
     {
         try {
@@ -975,10 +969,12 @@ class OrderController extends Controller
         } catch (ModelNotFoundException $e) {
             return response()->json(['status' => 'error', 'message' => 'Order not found.'], 404);
         }
+
         try {
             $data = $this->buildInvoiceData($order);
             Mail::to($order->customer_email)->send(new InvoiceMail($order, $data));
             $this->sendInvoiceWhatsApp($order, $data);
+
             return response()->json([
                 'status' => 'success',
                 'message' => 'Invoice emailed to ' . $order->customer_email,
@@ -988,12 +984,7 @@ class OrderController extends Controller
             return response()->json(['status' => 'error', 'message' => 'Failed to send invoice email.'], 500);
         }
     }
-    // ═══════════════════════════════════════════════════════════════
-    // PRIVATE HELPER: Silently send the invoice email + WhatsApp (used
-    // internally after a payment status transitions to 'Paid', or right
-    // after a COD order is placed/confirmed). Never throws — logs and
-    // swallows errors so it doesn't break the calling flow.
-    // ═══════════════════════════════════════════════════════════════
+
     private function sendInvoiceEmail(Order $order): void
     {
         try {
@@ -1005,51 +996,42 @@ class OrderController extends Controller
             Log::error('Invoice Email Error (Order #' . $order->id . '): ' . $e->getMessage());
         }
     }
-    // ═══════════════════════════════════════════════════════════════
-    // PRIVATE HELPER: Idempotent wrapper around sendInvoiceEmail().
-    //
-    // An order's invoice can now be triggered from three places:
-    //   1. checkout()    — immediately, for COD orders
-    //   2. confirmCod()  — if the frontend confirms COD via a separate
-    //                      step rather than at checkout
-    //   3. updateStatus()— when payment_status flips to 'Paid'
-    //                      (prepaid/Razorpay orders)
-    //
-    // buildInvoiceData() stamps invoice_number on first call, so we use
-    // that as the "already sent" guard — this prevents duplicate
-    // emails/WhatsApp messages if more than one of the above fires for
-    // the same order.
-    // ═══════════════════════════════════════════════════════════════
+
+    // Idempotent: invoice_number is the "already sent" guard.
     private function maybeSendInvoice(Order $order): void
     {
         if (!empty($order->invoice_number)) {
             return;
         }
+
         $this->sendInvoiceEmail($order);
     }
-    // ═══════════════════════════════════════════════════════════════
+
     // PATCH /orders/{id}/status
-    // ═══════════════════════════════════════════════════════════════
     public function updateStatus(Request $request, $id)
     {
         $validator = Validator::make($request->all(), [
             'delivery_status' => 'sometimes|string|in:' . implode(',', self::DELIVERY_STATUSES),
             'payment_status' => 'sometimes|string|in:' . implode(',', self::PAYMENT_STATUSES),
         ]);
+
         if ($validator->fails()) {
             return response()->json(['status' => 'error', 'errors' => $validator->errors()], 422);
         }
+
         if (!$request->filled('delivery_status') && !$request->filled('payment_status')) {
             return response()->json([
                 'status' => 'error',
                 'message' => 'Provide at least one of delivery_status or payment_status.',
             ], 422);
         }
+
         try {
             $order = Order::findOrFail($id);
         } catch (ModelNotFoundException $e) {
             return response()->json(['status' => 'error', 'message' => 'Order not found.'], 404);
         }
+
         if (in_array($order->delivery_status, self::NON_CANCELLABLE_STATUSES) && $request->filled('delivery_status')) {
             if ($order->delivery_status !== $request->delivery_status) {
                 return response()->json([
@@ -1058,18 +1040,28 @@ class OrderController extends Controller
                 ], 422);
             }
         }
+
         try {
             $wasPaid = $order->payment_status === 'Paid';
+
             if ($request->filled('delivery_status')) {
                 $order->delivery_status = $request->delivery_status;
             }
             if ($request->filled('payment_status')) {
                 $order->payment_status = $request->payment_status;
             }
+
+            // Payment completed => order is placed.
+            if ($order->payment_status === 'Paid' && empty($order->placed_at)) {
+                $order->placed_at = now();
+            }
+
             $order->save();
+
             if (!$wasPaid && $order->payment_status === 'Paid') {
                 $this->maybeSendInvoice($order->fresh());
             }
+
             return response()->json([
                 'status' => 'success',
                 'message' => 'Order status updated successfully.',
@@ -1080,9 +1072,8 @@ class OrderController extends Controller
             return response()->json(['status' => 'error', 'message' => 'Failed to update order status.'], 500);
         }
     }
-    // ═══════════════════════════════════════════════════════════════
+
     // POST /orders/{id}/cancel
-    // ═══════════════════════════════════════════════════════════════
     public function cancel(Request $request, $id)
     {
         try {
@@ -1090,13 +1081,16 @@ class OrderController extends Controller
         } catch (ModelNotFoundException $e) {
             return response()->json(['status' => 'error', 'message' => 'Order not found.'], 404);
         }
+
         if (in_array($order->delivery_status, self::NON_CANCELLABLE_STATUSES)) {
             return response()->json([
                 'status' => 'error',
                 'message' => "Order cannot be cancelled because it is already '{$order->delivery_status}'.",
             ], 422);
         }
+
         DB::beginTransaction();
+
         try {
             foreach ($order->items as $item) {
                 if ($item->product_size_stock_id) {
@@ -1108,12 +1102,15 @@ class OrderController extends Controller
                     }
                 }
             }
+
             $order->delivery_status = 'Cancelled';
             if ($order->payment_status === 'Paid') {
                 $order->payment_status = 'Refunded';
             }
             $order->save();
+
             DB::commit();
+
             return response()->json([
                 'status' => 'success',
                 'message' => 'Order cancelled successfully.',
@@ -1125,14 +1122,14 @@ class OrderController extends Controller
             return response()->json(['status' => 'error', 'message' => 'Failed to cancel order.'], 500);
         }
     }
-    // ═══════════════════════════════════════════════════════════════
+
     // DELETE /orders/{id}
-    // ═══════════════════════════════════════════════════════════════
     public function destroy($id)
     {
         try {
             $order = Order::findOrFail($id);
             $order->delete();
+
             return response()->json(['status' => 'success', 'message' => 'Order deleted successfully.'], 200);
         } catch (ModelNotFoundException $e) {
             return response()->json(['status' => 'error', 'message' => 'Order not found.'], 404);

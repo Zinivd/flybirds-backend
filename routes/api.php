@@ -242,6 +242,13 @@ Route::post('/orders/{id}/cancel', [OrderController::class, 'cancel']);
 Route::delete('/orders/{id}', [OrderController::class, 'destroy']);
 Route::get('/orders/check-stock', [OrderController::class, 'checkStock']);
 
+Route::get('/orders/upcoming', [OrderController::class, 'upcomingOrders']);
+// Route::get('/orders/check-stock', [OrderController::class, 'checkStock']);
+// Route::get('/orders', [OrderController::class, 'index']);
+// Route::get('/orders/{id}', [OrderController::class, 'show']);
+
+
+
 Route::post('/recently-viewed', [RecentlyViewedController::class, 'store']);
 Route::get('/recently-viewed/{userId}', [RecentlyViewedController::class, 'index']);
 Route::delete('/recently-viewed/{userId}/{productId}', [RecentlyViewedController::class, 'destroy']);
