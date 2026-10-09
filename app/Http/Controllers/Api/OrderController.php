@@ -25,7 +25,7 @@ class OrderController extends Controller
         protected DelhiveryService $delhivery
     ) {
     }
-    private const DELIVERY_STATUSES = ['Packed', 'Shipped', 'Out For Delivery', 'Delivered', 'RTO', 'Cancelled', 'Refunded'];
+    private const DELIVERY_STATUSES = ['Packed', 'Shipped', 'In Transit', 'Out For Delivery', 'Delivered', 'RTO', 'Cancelled', 'Refunded'];
     private const PAYMENT_STATUSES = ['Pending', 'Paid', 'Failed', 'Refunded'];
     private const NON_CANCELLABLE_STATUSES = ['Delivered', 'Cancelled', 'Refunded'];
     // ─────────────────────────────────────────────────────────────
@@ -708,7 +708,7 @@ class OrderController extends Controller
     public function index(Request $request)
     {
         try {
-            $query = Order::with(array_merge(['items'], self::ITEM_DETAIL_RELATIONS));
+            $query = Order::placed()->with(array_merge(['items'], self::ITEM_DETAIL_RELATIONS));
             if ($request->filled('search')) {
                 $search = $request->search;
                 $query->where(function ($q) use ($search) {
@@ -765,7 +765,7 @@ class OrderController extends Controller
     public function myOrders(Request $request, $userId)
     {
         try {
-            $query = Order::with(array_merge(['items'], self::ITEM_DETAIL_RELATIONS))->where('customer_id', $userId);
+           $query = Order::placed()->with(array_merge(['items'], self::ITEM_DETAIL_RELATIONS))->where('customer_id', $userId);
             if ($request->filled('delivery_status')) {
                 $query->where('delivery_status', $request->delivery_status);
             }
@@ -934,7 +934,7 @@ class OrderController extends Controller
     public function invoice($id)
     {
         try {
-            $order = Order::with(['items.productSizeStock'])->findOrFail($id);
+            $order = Order::placed()->with(['items.productSizeStock'])->findOrFail($id);
         } catch (ModelNotFoundException $e) {
             return response()->json(['status' => 'error', 'message' => 'Order not found.'], 404);
         }
@@ -954,7 +954,7 @@ class OrderController extends Controller
     public function invoiceMail($id)
     {
         try {
-            $order = Order::with(['items.productSizeStock'])->findOrFail($id);
+           $order = Order::placed()->with(['items.productSizeStock'])->findOrFail($id);
         } catch (ModelNotFoundException $e) {
             return response()->json(['status' => 'error', 'message' => 'Order not found.'], 404);
         }

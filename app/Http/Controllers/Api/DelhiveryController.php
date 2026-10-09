@@ -4,24 +4,19 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Http\Requests\CreateShipmentRequest;
-use App\Models\DelhiveryShipment;
 use App\Models\Order;
 use App\Models\ProductSizeStock;
 use App\Services\DelhiveryService;
-use Doctrine\DBAL\ConnectionException;
+use App\Services\OrderTrackingService;
+use Exception;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Validator;
-use Exception;
-use Log;
+use Illuminate\Support\Facades\Log;
 
 class DelhiveryController extends Controller
 {
-    // Mirrors OrderController::DELIVERY_STATUSES / NON_CANCELLABLE_STATUSES.
-    // Duplicated here (rather than shared) only because these two
-    // controllers currently live independently — if you refactor later,
-    // pull both into a shared OrderStatus enum/service so this list can't
-    // drift between the two files again.
+    // Mirrors OrderController::NON_CANCELLABLE_STATUSES.
     private const NON_CANCELLABLE_STATUSES = ['Delivered', 'Cancelled', 'Refunded'];
 
     public function __construct(protected DelhiveryService $delhivery)
@@ -69,73 +64,52 @@ class DelhiveryController extends Controller
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // GET /user/delhivery/track/{orderId}
-    // Customer-facing tracking — looks up the order by its order_id
-    // string (e.g. FLYODR-0807&A00011), resolves its waybill, and
-    // returns live shipment status. Never exposes the raw waybill/
-    // carrier payload to the storefront beyond what's needed.
+    // GET /user/delhivery/track/{orderId}?user_id=XXXX
+    // Customer-facing tracking (Flipkart-style payload).
     // ═══════════════════════════════════════════════════════════════
-    public function trackMyOrder(string $orderId)
+    public function trackMyOrder(Request $request, string $orderId, OrderTrackingService $tracking)
     {
-        $order = Order::where('order_id', $orderId)->first();
+        $userId = auth()->user()->user_id ?? $request->query('user_id');
+        if (!$userId) {
+            return response()->json(['status' => 'error', 'message' => 'user_id is required.'], 422);
+        }
+
+        $order = Order::placed()
+            ->where('order_id', $orderId)
+            ->where('customer_id', $userId)
+            ->first();
+
         if (!$order) {
-            return response()->json([
-                'status' => 'error',
-                'message' => 'Order not found.',
-            ], 404);
+            return response()->json(['status' => 'error', 'message' => 'Order not found.'], 404);
         }
-        if (!$order->awb_number) {
-            return response()->json([
-                'status' => 'success',
-                'data' => [
-                    'order_id' => $order->order_id,
-                    'shipment_status' => 'not_shipped',
-                    'message' => 'This order has not been shipped yet.',
-                ],
-            ], 200);
+
+        if ($order->awb_number) {
+            $tracking->sync($order);
+            $order->refresh();
         }
-        try {
-            $result = $this->delhivery->trackShipment($order->awb_number);
-            if (!$result['success']) {
-                return response()->json([
-                    'status' => 'error',
-                    'message' => 'Unable to fetch tracking status right now.',
-                ], 502);
-            }
-            return response()->json([
-                'status' => 'success',
-                'data' => [
-                    'order_id' => $order->order_id,
-                    'awb_number' => $order->awb_number,
-                    'delivery_status' => $order->delivery_status,
-                    'shipment_status' => $result['status'],
-                ],
-            ], 200);
-        } catch (ConnectionException $e) {
-            Log::error('Delhivery user tracking — connection failure', [
-                'order_id' => $order->id,
-                'error' => $e->getMessage(),
-            ]);
-            return response()->json(['error' => 'Could not reach Delhivery. Try again shortly.'], 504);
-        } catch (Exception $e) {
-            Log::error('Delhivery user tracking exception', [
-                'order_id' => $order->id,
-                'error' => $e->getMessage(),
-            ]);
-            return response()->json(['error' => 'Tracking failed'], 502);
+
+        return response()->json(['status' => 'success', 'data' => $tracking->present($order)], 200);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // GET /admin/orders/{id}/tracking?refresh=1
+    // ═══════════════════════════════════════════════════════════════
+    public function adminTracking(Request $request, $id, OrderTrackingService $tracking)
+    {
+        $order = Order::findOrFail($id);
+
+        if ($order->awb_number) {
+            $tracking->sync($order, $request->boolean('refresh'));
+            $order->refresh();
         }
+
+        return response()->json(['status' => 'success', 'data' => $tracking->present($order, true)], 200);
     }
 
     // ═══════════════════════════════════════════════════════════════
     // POST /admin/delhivery/shipment/cancel
-    //
-    // FIX: now mirrors OrderController::cancel() — restores stock for
-    // every item and sets delivery_status = 'Cancelled' (+ payment_status
-    // = 'Refunded' if it was 'Paid'), the same as cancelling an order
-    // directly. Previously this only touched shipment_status, so a
-    // shipment cancelled from here left the order looking untouched
-    // everywhere else in the admin UI — same class of bug as
-    // createShipment() not updating delivery_status.
+    // Mirrors OrderController::cancel(): restores stock, sets
+    // delivery_status = 'Cancelled' (+ 'Refunded' if it was 'Paid').
     // ═══════════════════════════════════════════════════════════════
     public function cancelShipment(Request $request)
     {
@@ -154,8 +128,6 @@ class DelhiveryController extends Controller
         if (!empty($validated['order_id'])) {
             $order = Order::findOrFail($validated['order_id']);
         } elseif ($waybill) {
-            // Look up by waybill too, so we can still sync delivery_status
-            // even when the caller only passed a waybill, not an order_id.
             $order = Order::where('awb_number', $waybill)->first();
         }
 
@@ -279,33 +251,6 @@ class DelhiveryController extends Controller
         }
     }
 
-    // public function updateNDR(Request $request)
-    // {
-    //     $validated = $request->validate([
-    //         'waybill' => 'required|string',
-    //         'action' => 'required|in:RE-ATTEMPT,DEFERRED,RTO',
-    //         'comment' => 'nullable|string|max:255',
-    //     ]);
-    //     try {
-    //         $result = $this->delhivery->updateNDR($validated['waybill'], $validated['action'], $validated['comment'] ?? null);
-
-    //         // NOTE: not wired to delivery_status yet — 'RE-ATTEMPT'/
-    //         // 'DEFERRED'/'RTO' don't map cleanly onto
-    //         // OrderController::DELIVERY_STATUSES as-is. Decide the
-    //         // intended mapping (e.g. RTO -> a new 'RTO' status, or reuse
-    //         // 'Cancelled') before wiring this the same way createShipment
-    //         // and cancelShipment now are.
-
-    //         return response()->json($result, $result['success'] ? 200 : 502);
-    //     } catch (ConnectionException $e) {
-    //         Log::error('Delhivery NDR — connection failure', ['error' => $e->getMessage()]);
-    //         return response()->json(['error' => 'Could not reach Delhivery. Try again shortly.'], 504);
-    //     } catch (Exception $e) {
-    //         Log::error('Delhivery NDR exception', ['error' => $e->getMessage()]);
-    //         return response()->json(['error' => 'NDR update failed'], 502);
-    //     }
-    // }
-
     public function updateEwaybill(Request $request)
     {
         $validated = $request->validate([
@@ -332,11 +277,11 @@ class DelhiveryController extends Controller
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // PRIVATE HELPER: Build a short products description from order items.
+    // PRIVATE HELPERS
     // ═══════════════════════════════════════════════════════════════
     private function buildProductsDescription(Order $order): string
     {
-        $items = $order->items()->get(); // fresh Collection, not a Relation/Builder
+        $items = $order->items()->get();
         $names = $items->pluck('product_name')->unique()->values();
         if ($names->count() <= 3) {
             return $names->implode(', ');
@@ -344,13 +289,9 @@ class DelhiveryController extends Controller
         return $names->take(3)->implode(', ') . ' and ' . ($names->count() - 3) . ' more';
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    // PRIVATE HELPER: Compute total order weight in grams from items.
-    // Falls back to a configured default if no product weights are set.
-    // ═══════════════════════════════════════════════════════════════
     private function calculateOrderWeight(Order $order): int
     {
-        $items = $order->items()->with('product')->get(); // fresh Collection
+        $items = $order->items()->with('product')->get();
         $total = 0;
         foreach ($items as $item) {
             $total += ($item->product->weight ?? 0) * $item->quantity;
@@ -358,10 +299,6 @@ class DelhiveryController extends Controller
         return $total > 0 ? (int) $total : (int) config('services.delhivery.default_weight_grams', 500);
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    // PRIVATE HELPER: Strip a phone number down to the last 10 digits,
-    // stripping any leading 0, +91, or 91 country-code prefix.
-    // ═══════════════════════════════════════════════════════════════
     private function sanitizePhone(?string $phone): string
     {
         $digits = preg_replace('/\D+/', '', (string) $phone);
@@ -370,17 +307,13 @@ class DelhiveryController extends Controller
 
     // ═══════════════════════════════════════════════════════════════
     // POST /admin/delhivery/shipment/create
-    //
-    // FIX: on success, this now ALSO sets delivery_status = 'Shipped'
-    // and shipped_at = now() — not just awb_number/shipment_status.
-    // delivery_status is the field OrderController::index()/show() and
-    // your Angular order list actually read, so without this the order
-    // kept showing "Pending" even after a shipment was created.
+    // Sets delivery_status = 'Shipped' and shipped_at on success.
+    // Only placed orders can be shipped; COD is detected case-insensitively.
     // ═══════════════════════════════════════════════════════════════
     public function createShipment(CreateShipmentRequest $request)
     {
         $validated = $request->validated();
-        $order = Order::where('order_id', $validated['order_id'])->firstOrFail();
+        $order = Order::placed()->where('order_id', $validated['order_id'])->firstOrFail();
 
         if ($order->awb_number) {
             return response()->json([
@@ -415,10 +348,8 @@ class DelhiveryController extends Controller
             ], 422);
         }
 
-        // Optional pre-fetched waybill (from GET /admin/delhivery/waybill).
-        // If the frontend fetched one first, we tell Delhivery to use it
-        // instead of letting Delhivery auto-assign one during creation.
         $preFetchedWaybill = $validated['waybill'] ?? null;
+        $isCod = strtolower((string) $order->payment_method) === 'cod';
 
         $shipmentPayload = [
             'order' => $order->order_id,
@@ -428,10 +359,10 @@ class DelhiveryController extends Controller
             'city' => $city,
             'state' => $state,
             'phone' => $phone,
-            'payment_mode' => $order->payment_method === 'COD' ? 'COD' : 'Prepaid',
+            'payment_mode' => $isCod ? 'COD' : 'Prepaid',
             'products_desc' => $this->buildProductsDescription($order),
             'total_amount' => $order->amount,
-            'cod_amount' => $order->payment_method === 'COD' ? $order->amount : 0,
+            'cod_amount' => $isCod ? $order->amount : 0,
             'quantity' => $order->items()->count() ?: 1,
             'weight' => $validated['weight'] ?? $this->calculateOrderWeight($order),
             'shipment_length' => $validated['shipment_length'] ?? null,
@@ -447,20 +378,13 @@ class DelhiveryController extends Controller
             $result = $this->delhivery->createShipment($shipmentPayload);
 
             if ($result['success']) {
-                // Prefer whatever Delhivery echoes back; fall back to the
-                // waybill we supplied if the response doesn't include one.
                 $finalWaybill = $result['waybill'] ?? $preFetchedWaybill;
 
                 $order->update([
                     'awb_number' => $finalWaybill,
                     'shipment_status' => 'created',
-                    // THE FIX — this is the field the order list/detail
-                    // endpoints and the Angular UI actually display.
                     'delivery_status' => 'Shipped',
                     'shipped_at' => now(),
-                    // Optional: raw carrier-side status, if Delhivery's
-                    // response includes one — falls back to a sensible
-                    // default label rather than staying null.
                     'delhivery_status' => $result['status'] ?? $result['data']['status'] ?? 'Manifested',
                 ]);
             }
@@ -480,7 +404,6 @@ class DelhiveryController extends Controller
             return response()->json(['error' => 'Shipment creation failed'], 502);
         }
     }
-
 
     public function listNdr(Request $request)
     {
@@ -502,76 +425,34 @@ class DelhiveryController extends Controller
         return response()->json(['status' => 'success', 'data' => $orders], 200);
     }
 
-
-
-    public function syncNdrStatus(Request $request)
+    // ═══════════════════════════════════════════════════════════════
+    // POST /admin/delhivery/ndr/sync
+    // ═══════════════════════════════════════════════════════════════
+    public function syncNdrStatus(Request $request, OrderTrackingService $tracking)
     {
-        $terminalStatuses = ['Delivered', 'Cancelled', 'Refunded', 'RTO'];
-
         $orders = Order::whereNotNull('awb_number')
-            ->whereNotIn('delivery_status', $terminalStatuses)
+            ->whereNotIn('delivery_status', ['Delivered', 'Cancelled', 'Refunded', 'RTO'])
             ->get();
 
-        $checked = 0;
-        $flagged = 0;
         $errors = 0;
-
         foreach ($orders as $order) {
-            $checked++;
-            try {
-                $result = $this->delhivery->trackShipment($order->awb_number);
-                if (!($result['success'] ?? false)) {
-                    $errors++;
-                    continue;
-                }
-
-                $statusType = $result['status_type'] ?? null;
-
-                if ($statusType === 'UD') {
-                    // Undelivered attempt — flag/refresh the NDR.
-                    $order->forceFill([
-                        'ndr_status' => 'open',
-                        'ndr_reason' => $result['ndr_reason'] ?? $result['status'] ?? 'Delivery attempt failed',
-                        'ndr_updated_at' => now(),
-                        'delhivery_status' => $result['status'] ?? $order->delhivery_status,
-                    ])->save();
-                    $flagged++;
-                } elseif ($order->ndr_status && in_array($statusType, ['DL', 'RT'], true)) {
-                    // Was flagged, now resolved on Delhivery's side (delivered
-                    // or returned) — clear the local flag so it drops off the list.
-                    $order->forceFill([
-                        'ndr_status' => null,
-                        'ndr_reason' => null,
-                        'ndr_updated_at' => now(),
-                        'delhivery_status' => $result['status'] ?? $order->delhivery_status,
-                    ])->save();
-                } elseif ($result['status'] ?? null) {
-                    // Not an NDR, just refresh the raw carrier status.
-                    $order->forceFill(['delhivery_status' => $result['status']])->save();
-                }
-            } catch (Exception $e) {
+            if (!$tracking->sync($order, true)) {
                 $errors++;
-                Log::error('NDR sync failed for order ' . $order->id . ': ' . $e->getMessage());
             }
         }
 
         return response()->json([
             'status' => 'success',
-            'message' => "Checked {$checked} orders — {$flagged} in NDR, {$errors} errors.",
-            'data' => ['checked' => $checked, 'flagged' => $flagged, 'errors' => $errors],
+            'message' => "Checked {$orders->count()} orders, {$errors} errors.",
+            'data' => ['checked' => $orders->count(), 'errors' => $errors],
         ], 200);
     }
 
     // ═══════════════════════════════════════════════════════════════
-// POST /admin/delhivery/ndr/update  (EXISTING — updated below)
-//
-// FIX: now also updates the order's local ndr_status after a
-// successful action, instead of leaving it stale until the next sync:
-//   - RE-ATTEMPT / DEFERRED → NDR stays open, but ndr_reason records
-//     the action taken and a fresh ndr_updated_at.
-//   - RTO → order moves to a terminal 'RTO' delivery_status and the
-//     NDR flag clears (nothing left to resolve).
-// ═══════════════════════════════════════════════════════════════
+    // POST /admin/delhivery/ndr/update
+    // RE-ATTEMPT / DEFERRED keep the NDR open; RTO moves the order to
+    // the terminal 'RTO' status and clears the NDR flag.
+    // ═══════════════════════════════════════════════════════════════
     public function updateNDR(Request $request)
     {
         $validated = $request->validate([

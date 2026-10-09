@@ -267,6 +267,14 @@ Route::get('/orders/{id}/shipping-quote', [OrderController::class, 'shippingQuot
 
 
 
+// customer
+Route::get('/user/delhivery/track/{orderId}', [DelhiveryController::class, 'trackMyOrder']);
+
+// admin
+Route::get('/admin/orders/{id}/tracking', [DelhiveryController::class, 'adminTracking']);
+
+
+
 
 
 Route::post('/orders/{id}/cod-confirm', [OrderController::class, 'confirmCod']);
