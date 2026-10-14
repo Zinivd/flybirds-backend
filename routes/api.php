@@ -52,10 +52,10 @@ Route::prefix('auth')->group(function () {
 });
 
 Route::prefix('admin')->group(function () {
-   Route::post('/video-reels', [VideoReelController::class, 'store']);
-Route::get('/video-reels', [VideoReelController::class, 'index']);
-Route::patch('/video-reels/{id}/status', [VideoReelController::class, 'updateStatus']);
-Route::patch('/video-reels/{id}/product', [VideoReelController::class, 'updateProduct']);
+    Route::post('/video-reels', [VideoReelController::class, 'store']);
+    Route::get('/video-reels', [VideoReelController::class, 'index']);
+    Route::patch('/video-reels/{id}/status', [VideoReelController::class, 'updateStatus']);
+    Route::patch('/video-reels/{id}/product', [VideoReelController::class, 'updateProduct']);
 
     // Categories
     Route::prefix('categories')->group(function () {
@@ -367,3 +367,6 @@ Route::prefix('admin/spotlights')->group(function () {
 });
 // ---- PUBLIC / USER SIDE (no auth) ----
 Route::get('/spotlights', [SpotlightController::class, 'publicIndex']);
+
+Route::get('admin/carts', [CartWishController::class, 'adminCartList']);
+Route::get('admin/carts/by-user', [CartWishController::class, 'adminCartByUser']);

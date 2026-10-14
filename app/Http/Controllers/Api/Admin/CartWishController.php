@@ -1,4 +1,5 @@
 <?php
+
 namespace App\Http\Controllers\Api\Admin;
 
 use App\Http\Controllers\Controller;
@@ -15,7 +16,7 @@ use Illuminate\Validation\ValidationException;
 
 class CartWishController extends Controller
 {
-        public function addToCart(Request $request, $userId)
+    public function addToCart(Request $request, $userId)
     {
         try {
             $validated = $request->validate([
@@ -155,10 +156,10 @@ class CartWishController extends Controller
                 'familyColorChild',
                 'sizeStock',
             ])
-            ->where('user_id', $userId)
-            ->where('type', 'cart')
-            ->latest()
-            ->get();
+                ->where('user_id', $userId)
+                ->where('type', 'cart')
+                ->latest()
+                ->get();
             $total = $cartItems->sum(function ($item) {
                 $price = $item->sizeStock->price ?? $item->product->unit_price ?? 0;
                 return $price * $item->quantity;
@@ -322,10 +323,10 @@ class CartWishController extends Controller
                 'product.colorVariants.thumbnailImage',
                 'product.colorVariants.galleryImages',
             ])
-            ->where('user_id', $userId)
-            ->where('type', 'wishlist')
-            ->latest()
-            ->get();
+                ->where('user_id', $userId)
+                ->where('type', 'wishlist')
+                ->latest()
+                ->get();
 
             $wishlistItems->each(function ($item) {
                 if ($item->product) {
@@ -378,26 +379,113 @@ class CartWishController extends Controller
 
 
     public function cartWishSummary($userId)
+    {
+        try {
+            $cartCount = CartWishlistData::where('user_id', $userId)
+                ->where('type', 'cart')
+                ->sum('quantity'); // use ->count() instead if you want line-item count, not total qty
+
+            $hasWishlist = CartWishlistData::where('user_id', $userId)
+                ->where('type', 'wishlist')
+                ->exists();
+
+            return response()->json([
+                'status' => 'success',
+                'data'   => [
+                    'cart_count'    => (int) $cartCount,
+                    'has_wishlist'  => $hasWishlist,
+                ],
+            ], 200);
+        } catch (Exception $e) {
+            Log::error('Cart/Wishlist Summary Error: ' . $e->getMessage());
+            return response()->json(['status' => 'error', 'message' => 'Failed to retrieve cart/wishlist summary.'], 500);
+        }
+    }
+
+
+   /**
+ * ADMIN: all users' cart items (full list, no pagination)
+ * GET /api/admin/carts?user_id=&product_id=
+ */
+public function adminCartList(Request $request)
 {
     try {
-        $cartCount = CartWishlistData::where('user_id', $userId)
-            ->where('type', 'cart')
-            ->sum('quantity'); // use ->count() instead if you want line-item count, not total qty
+        $query = CartWishlistData::with([
+                'user',
+                'product:id,name,unit_price,discount,discount_type',
+                'colorVariant.familyColor',
+                'colorVariant.familyColorChild',
+                'colorVariant.thumbnailImage',
+                'familyColor',
+                'familyColorChild',
+                'sizeStock',
+            ])
+            ->where('type', 'cart');
 
-        $hasWishlist = CartWishlistData::where('user_id', $userId)
-            ->where('type', 'wishlist')
-            ->exists();
+        if ($request->filled('user_id')) {
+            $query->where('user_id', $request->user_id);
+        }
+        if ($request->filled('product_id')) {
+            $query->where('product_id', $request->product_id);
+        }
+
+        $items = $query->latest()->get()->map(function ($item) {
+            $price = $item->sizeStock->price ?? $item->product->unit_price ?? 0;
+            $item->setAttribute('unit_price', $price);
+            $item->setAttribute('line_total', $price * $item->quantity);
+            return $item;
+        });
 
         return response()->json([
             'status' => 'success',
-            'data'   => [
-                'cart_count'    => (int) $cartCount,
-                'has_wishlist'  => $hasWishlist,
-            ],
+            'data'   => $items,
         ], 200);
     } catch (Exception $e) {
-        Log::error('Cart/Wishlist Summary Error: ' . $e->getMessage());
-        return response()->json(['status' => 'error', 'message' => 'Failed to retrieve cart/wishlist summary.'], 500);
+        Log::error('Admin Cart List Error: ' . $e->getMessage());
+        return response()->json(['status' => 'error', 'message' => 'Failed to retrieve carts.'], 500);
+    }
+}
+
+/**
+ * ADMIN: carts grouped by user (full list, no pagination)
+ * GET /api/admin/carts/by-user
+ */
+public function adminCartByUser()
+{
+    try {
+        $items = CartWishlistData::with([
+                'user',
+                'product:id,name,unit_price',
+                'colorVariant.familyColor',
+                'colorVariant.thumbnailImage',
+                'sizeStock',
+            ])
+            ->where('type', 'cart')
+            ->latest()
+            ->get()
+            ->map(function ($i) {
+                $price = $i->sizeStock->price ?? $i->product->unit_price ?? 0;
+                $i->setAttribute('unit_price', $price);
+                $i->setAttribute('line_total', $price * $i->quantity);
+                return $i;
+            });
+
+        $grouped = $items->groupBy('user_id')->map(function ($userItems, $userId) {
+            return [
+                'user_id'        => $userId,
+                'user'           => $userItems->first()->user,
+                'total_quantity' => (int) $userItems->sum('quantity'),
+                'line_items'     => $userItems->count(),
+                'cart_total'     => $userItems->sum('line_total'),
+                'last_updated'   => $userItems->max('updated_at'),
+                'items'          => $userItems->values(),
+            ];
+        })->values();
+
+        return response()->json(['status' => 'success', 'data' => $grouped], 200);
+    } catch (Exception $e) {
+        Log::error('Admin Cart By User Error: ' . $e->getMessage());
+        return response()->json(['status' => 'error', 'message' => 'Failed to retrieve carts.'], 500);
     }
 }
 }
