@@ -30,7 +30,10 @@ class OrderController extends Controller
 
     private const DELIVERY_STATUSES = ['Packed', 'Shipped', 'In Transit', 'Out For Delivery', 'Delivered', 'RTO', 'Cancelled', 'Refunded'];
     private const PAYMENT_STATUSES = ['Pending', 'Paid', 'Failed', 'Refunded'];
-    private const NON_CANCELLABLE_STATUSES = ['Delivered', 'Cancelled', 'Refunded'];
+
+    // Terminal states: cannot be changed via updateStatus / confirmCod.
+    // Cancel eligibility is decided by Order::cancellationBlockReason(), not here.
+    private const FINAL_STATUSES = ['Delivered', 'Cancelled', 'Refunded'];
 
     // TAX DISABLED: `tax` is always persisted as 0.0 and never added to `amount`.
     private const FALLBACK_SHIPPING_CHARGE = 49.0;
@@ -222,9 +225,7 @@ class OrderController extends Controller
         return $orderOrOrders;
     }
 
-    // ═══════════════════════════════════════════════════════════════
     // GET /orders/check-stock
-    // ═══════════════════════════════════════════════════════════════
     public function checkStock(Request $request)
     {
         try {
@@ -406,15 +407,8 @@ class OrderController extends Controller
         return self::FALLBACK_SHIPPING_CHARGE;
     }
 
-    // ═══════════════════════════════════════════════════════════════
     // POST /orders/checkout
-    //
-    // Creates the order in an UNPLACED state (placed_at = null). It only
-    // becomes a "placed" order once the customer completes payment
-    // (Razorpay -> payment_status 'Paid') or confirms Cash on Delivery
-    // (confirmCod sets placed_at). Until then it appears in the
-    // upcoming-orders API, not the main orders list.
-    // ═══════════════════════════════════════════════════════════════
+    // Creates the order UNPLACED (placed_at = null) until payment/COD confirmation.
     public function checkout(Request $request)
     {
         try {
@@ -515,8 +509,6 @@ class OrderController extends Controller
                 'shipping_address' => $validated['shipping_address'],
                 'shipping_pincode' => $validated['shipping_pincode'] ?? $this->extractPincodeFromAddress($validated['shipping_address']),
                 'billing_address' => $validated['billing_address'] ?? null,
-                // COD sent directly at checkout is already "placed";
-                // anything else stays upcoming until payment completes.
                 'placed_at' => $isCod ? now() : null,
             ]);
 
@@ -582,9 +574,7 @@ class OrderController extends Controller
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════
     // GET /orders/{id}/shipping-quote?payment_method=cod|razorpay
-    // ═══════════════════════════════════════════════════════════════
     public function shippingQuote(Request $request, $id)
     {
         $validated = $request->validate([
@@ -625,10 +615,7 @@ class OrderController extends Controller
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════
     // POST /orders/{id}/cod-confirm
-    // Confirming COD is what turns an upcoming order into a placed one.
-    // ═══════════════════════════════════════════════════════════════
     public function confirmCod(Request $request, $id)
     {
         try {
@@ -644,7 +631,7 @@ class OrderController extends Controller
             ], 422);
         }
 
-        if (in_array($order->delivery_status, self::NON_CANCELLABLE_STATUSES)) {
+        if (in_array($order->delivery_status, self::FINAL_STATUSES)) {
             return response()->json([
                 'status' => 'error',
                 'message' => "Order cannot be confirmed because it is already '{$order->delivery_status}'.",
@@ -663,7 +650,7 @@ class OrderController extends Controller
             $order->tax = $tax;
             $order->amount = $amount;
             if (empty($order->placed_at)) {
-                $order->placed_at = now(); // order is now officially placed
+                $order->placed_at = now();
             }
             $order->save();
 
@@ -680,9 +667,7 @@ class OrderController extends Controller
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    // PRIVATE HELPER: Shared search/status/date filters for list endpoints.
-    // ═══════════════════════════════════════════════════════════════
+    // Shared search/status/date filters for list endpoints.
     private function applyListFilters($query, Request $request)
     {
         if ($request->filled('search')) {
@@ -730,9 +715,7 @@ class OrderController extends Controller
         ], 200);
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    // GET /orders — Admin list. ONLY PLACED orders (paid, or COD-confirmed).
-    // ═══════════════════════════════════════════════════════════════
+    // GET /orders — Admin list. Only PLACED orders (cancelled ones included).
     public function index(Request $request)
     {
         try {
@@ -746,11 +729,7 @@ class OrderController extends Controller
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    // GET /orders/upcoming — Orders that were started (checkout reached)
-    // but NOT yet placed: no completed payment and no COD confirmation.
-    // Optional: ?user_id=... to scope to one customer.
-    // ═══════════════════════════════════════════════════════════════
+    // GET /orders/upcoming
     public function upcomingOrders(Request $request)
     {
         try {
@@ -785,7 +764,9 @@ class OrderController extends Controller
         }
     }
 
-    // GET /users/{userId}/orders — customer's placed orders only
+    // GET /users/{userId}/orders
+    // Cancelled orders are included with delivery_status 'Cancelled',
+    // cancelled_at and cancellation_reason, so the customer sees the cancellation.
     public function myOrders(Request $request, $userId)
     {
         try {
@@ -1008,6 +989,7 @@ class OrderController extends Controller
     }
 
     // PATCH /orders/{id}/status
+    // 'Cancelled' is NOT allowed here any more: use POST /admin/orders/{id}/cancel
     public function updateStatus(Request $request, $id)
     {
         $validator = Validator::make($request->all(), [
@@ -1026,13 +1008,20 @@ class OrderController extends Controller
             ], 422);
         }
 
+        if ($request->delivery_status === 'Cancelled') {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Use the admin cancel endpoint (POST /admin/orders/{id}/cancel) to cancel an order.',
+            ], 422);
+        }
+
         try {
             $order = Order::findOrFail($id);
         } catch (ModelNotFoundException $e) {
             return response()->json(['status' => 'error', 'message' => 'Order not found.'], 404);
         }
 
-        if (in_array($order->delivery_status, self::NON_CANCELLABLE_STATUSES) && $request->filled('delivery_status')) {
+        if (in_array($order->delivery_status, self::FINAL_STATUSES) && $request->filled('delivery_status')) {
             if ($order->delivery_status !== $request->delivery_status) {
                 return response()->json([
                     'status' => 'error',
@@ -1051,7 +1040,6 @@ class OrderController extends Controller
                 $order->payment_status = $request->payment_status;
             }
 
-            // Payment completed => order is placed.
             if ($order->payment_status === 'Paid' && empty($order->placed_at)) {
                 $order->placed_at = now();
             }
@@ -1073,40 +1061,61 @@ class OrderController extends Controller
         }
     }
 
-    // POST /orders/{id}/cancel
-    public function cancel(Request $request, $id)
+    // ═══════════════════════════════════════════════════════════════
+    // POST /admin/orders/{id}/cancel   (ADMIN ONLY)
+    // Body: { "reason": "..." }
+    // Allowed only before AWB / label generation and before shipping.
+    // ═══════════════════════════════════════════════════════════════
+    public function adminCancel(Request $request, $id)
     {
-        try {
-            $order = Order::with('items')->findOrFail($id);
-        } catch (ModelNotFoundException $e) {
-            return response()->json(['status' => 'error', 'message' => 'Order not found.'], 404);
-        }
+        $validator = Validator::make($request->all(), [
+            'reason' => 'required|string|min:3|max:500',
+        ]);
 
-        if (in_array($order->delivery_status, self::NON_CANCELLABLE_STATUSES)) {
+        if ($validator->fails()) {
             return response()->json([
                 'status' => 'error',
-                'message' => "Order cannot be cancelled because it is already '{$order->delivery_status}'.",
+                'message' => 'Validation failed.',
+                'errors' => $validator->errors(),
             ], 422);
         }
 
         DB::beginTransaction();
 
         try {
+            // Row lock so AWB/label generation and cancel can't race each other.
+            $order = Order::with('items')->lockForUpdate()->findOrFail($id);
+
+            $blockReason = $order->cancellationBlockReason();
+            if ($blockReason !== null) {
+                DB::rollBack();
+                return response()->json([
+                    'status' => 'error',
+                    'message' => $blockReason,
+                ], 422);
+            }
+
+            // Restore stock
             foreach ($order->items as $item) {
                 if ($item->product_size_stock_id) {
-                    $sizeStock = ProductSizeStock::find($item->product_size_stock_id);
-                    if ($sizeStock) {
-                        $sizeStock->increment('stock', $item->quantity);
-                    } else {
-                        Log::warning("Cancel Order #{$order->id}: size stock #{$item->product_size_stock_id} no longer exists, skipped stock reversal.");
+                    $affected = DB::table('product_size_stocks')
+                        ->where('id', $item->product_size_stock_id)
+                        ->increment('stock', (int) $item->quantity);
+
+                    if ($affected === 0) {
+                        Log::warning("Admin Cancel Order #{$order->id}: size stock #{$item->product_size_stock_id} no longer exists, skipped stock reversal.");
                     }
                 }
             }
 
             $order->delivery_status = 'Cancelled';
             if ($order->payment_status === 'Paid') {
+                // Status only; the real gateway refund must be triggered separately.
                 $order->payment_status = 'Refunded';
             }
+            $order->cancelled_at = now();
+            $order->cancelled_by = (string) ($request->user()?->id ?? $request->input('admin_id') ?? 'admin');
+            $order->cancellation_reason = $request->input('reason');
             $order->save();
 
             DB::commit();
@@ -1114,13 +1123,37 @@ class OrderController extends Controller
             return response()->json([
                 'status' => 'success',
                 'message' => 'Order cancelled successfully.',
-                'data' => $order->load('items'),
+                'data' => $order->fresh()->load('items'),
             ], 200);
+        } catch (ModelNotFoundException $e) {
+            DB::rollBack();
+            return response()->json(['status' => 'error', 'message' => 'Order not found.'], 404);
         } catch (Exception $e) {
             DB::rollBack();
-            Log::error('Order Cancel Error: ' . $e->getMessage());
+            Log::error('Admin Order Cancel Error (Order #' . $id . '): ' . $e->getMessage());
             return response()->json(['status' => 'error', 'message' => 'Failed to cancel order.'], 500);
         }
+    }
+
+    // GET /admin/orders/{id}/cancel-eligibility   (ADMIN ONLY)
+    public function cancelEligibility($id)
+    {
+        try {
+            $order = Order::findOrFail($id);
+        } catch (ModelNotFoundException $e) {
+            return response()->json(['status' => 'error', 'message' => 'Order not found.'], 404);
+        }
+
+        $reason = $order->cancellationBlockReason();
+
+        return response()->json([
+            'status' => 'success',
+            'data' => [
+                'order_id' => $order->order_id,
+                'can_cancel' => $reason === null,
+                'reason' => $reason,
+            ],
+        ], 200);
     }
 
     // DELETE /orders/{id}

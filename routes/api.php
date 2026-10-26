@@ -370,3 +370,10 @@ Route::get('/spotlights', [SpotlightController::class, 'publicIndex']);
 
 Route::get('admin/carts', [CartWishController::class, 'adminCartList']);
 Route::get('admin/carts/by-user', [CartWishController::class, 'adminCartByUser']);
+
+
+
+Route::prefix('admin')->group(function () {
+    Route::get('/orders/{id}/cancel-eligibility', [OrderController::class, 'cancelEligibility']);
+    Route::post('/orders/{id}/cancel', [OrderController::class, 'adminCancel']);
+});

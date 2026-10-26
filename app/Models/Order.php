@@ -44,6 +44,13 @@ class Order extends Model
         'billing_address',
         'shipped_at',
         'delivered_at',
+
+        // NEW
+        'placed_at',
+        'label_generated_at',
+        'cancelled_at',
+        'cancelled_by',
+        'cancellation_reason',
     ];
 
     protected $casts = [
@@ -53,6 +60,9 @@ class Order extends Model
         'ndr_updated_at' => 'datetime',
         'expected_delivery_at' => 'datetime',
         'last_tracked_at' => 'datetime',
+        'placed_at' => 'datetime',
+        'label_generated_at' => 'datetime',
+        'cancelled_at' => 'datetime',
         'shipment_snapshot' => 'array',
         'is_pincode_serviceable' => 'boolean',
         'amount' => 'decimal:2',
@@ -62,10 +72,14 @@ class Order extends Model
         'tax' => 'decimal:2',
     ];
 
+    // Sent in every JSON response so the admin UI can show/hide the Cancel button.
+    protected $appends = ['is_cancellable', 'cancellation_block_reason'];
+
+    public const SHIPPED_OR_LATER_STATUSES = [
+        'Shipped', 'In Transit', 'Out For Delivery', 'Delivered', 'RTO', 'Refunded',
+    ];
+
     // Only orders that were actually placed: COD, or prepaid that was paid/refunded.
-    // An order is "placed" once payment is complete OR COD is confirmed.
-    // The payment_status = 'Paid' fallback means Razorpay verifyPayment()
-    // works without any change to PaymentController.
     public function scopePlaced($query)
     {
         return $query->where(function ($q) {
@@ -80,6 +94,41 @@ class Order extends Model
         return $query->whereNull('placed_at')
             ->where('payment_status', '!=', 'Paid')
             ->whereNotIn('delivery_status', ['Cancelled']);
+    }
+
+    /**
+     * null  => admin may cancel.
+     * string => reason why cancel is blocked.
+     */
+    public function cancellationBlockReason(): ?string
+    {
+        if ($this->delivery_status === 'Cancelled') {
+            return 'Order is already cancelled.';
+        }
+
+        if (in_array($this->delivery_status, self::SHIPPED_OR_LATER_STATUSES, true) || !empty($this->shipped_at)) {
+            return "Order is already '{$this->delivery_status}' and can no longer be cancelled.";
+        }
+
+        if (!empty($this->awb_number) || !empty($this->waybill)) {
+            return 'AWB has already been generated for this order, so it can no longer be cancelled.';
+        }
+
+        if (!empty($this->label_generated_at)) {
+            return 'Shipping label has already been generated for this order, so it can no longer be cancelled.';
+        }
+
+        return null;
+    }
+
+    public function getIsCancellableAttribute(): bool
+    {
+        return $this->cancellationBlockReason() === null;
+    }
+
+    public function getCancellationBlockReasonAttribute(): ?string
+    {
+        return $this->cancellationBlockReason();
     }
 
     public function items()
